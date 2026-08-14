@@ -211,6 +211,34 @@ describe("Telemetry", () => {
     expect(t.latestRoot).toBe("b")
     expect(t.contextNow()).toBe(4200)
   })
+
+  test("setActiveSession switches selection and context to the active session", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    t.handle(sessionCreated("b"))
+    t.setActiveSession("root")
+    t.noteSelection("root", { provider: "opencode-go", model: "flash", agent: "build" })
+    t.noteSelection("b", { provider: "openai", model: "gpt", agent: "plan" })
+    t.handle(evt("message.part.updated", { part: stepFinish({ id: "sfr", sessionID: "root", messageID: "m1", tokens: { input: 300, output: 0, reasoning: 0, cache: { read: 700, write: 0 } } }) }))
+    t.handle(evt("message.part.updated", { part: stepFinish({ id: "sfb", sessionID: "b", messageID: "m2", tokens: { input: 1000, output: 0, reasoning: 0, cache: { read: 4000, write: 0 } } }) }))
+    expect(t.activeSelected().model).toBe("flash")
+    expect(t.contextNow()).toBe(1000)
+    t.setActiveSession("b")
+    expect(t.activeSelected().model).toBe("gpt")
+    expect(t.contextNow()).toBe(5000)
+  })
+
+  test("overrideSelection applies to the active session", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    t.handle(sessionCreated("b"))
+    t.noteSelection("root", { provider: "opencode-go", model: "flash", agent: "build" })
+    t.setActiveSession("b")
+    t.overrideSelection({ provider: "openai", model: "gpt" })
+    expect(t.activeSelected()).toEqual({ provider: "openai", model: "gpt" })
+    t.setActiveSession("root")
+    expect(t.activeSelected()).toEqual({ provider: "opencode-go", model: "flash", agent: "build" })
+  })
 })
 
 function emptyUsage() {

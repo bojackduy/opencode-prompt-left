@@ -1,18 +1,17 @@
 import type { Event } from "@opencode-ai/sdk"
 import type { Plugin } from "@opencode-ai/plugin"
-import { watch } from "node:fs"
-import { basename } from "node:path"
+import { watch, mkdirSync } from "node:fs"
+import { basename, join } from "node:path"
 import { Telemetry } from "./telemetry"
 import { readQuotaSnapshot } from "./quota"
 import { computeEstimate, type EstimateInput } from "./calibrator"
 import {
-  ESTIMATE_PATH,
-  HISTORY_PATH,
-  SELECTION_PATH,
-  STATE_DIR,
   freshHistory,
   readJson,
+  statePaths,
+  workspaceKey,
   writeJsonAtomic,
+  type ActiveFile,
   type EstimateFile,
   type HistoryState,
   type TuiSelection,
@@ -36,36 +35,54 @@ const TRACKED_EVENTS = new Set([
   "message.removed",
 ])
 
-interface ModelLimits {
+interface ModelInfo {
+  name?: string
   context?: number
-  input?: number
   output?: number
+  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number }
 }
 
+const KEY = workspaceKey(process.cwd())
+const paths = statePaths(KEY)
+
 const plugin: Plugin = async ({ client }, _options) => {
-  const raw = readJson<HistoryState>(HISTORY_PATH)
+  const raw = readJson<HistoryState>(paths.history)
   const history: HistoryState = raw?.version === 2 ? raw : freshHistory()
   const telemetry = new Telemetry(history)
+  if (history.activeSession) telemetry.setActiveSession(history.activeSession)
 
-  const modelLimits = new Map<string, ModelLimits>()
-  const modelNames = new Map<string, string>()
+  const modelCatalog = new Map<string, ModelInfo>()
   let quota = readQuotaSnapshot()
   let lastSnapAt = 0
   let pollTimer: ReturnType<typeof setInterval> | undefined
   let recomputeTimer: ReturnType<typeof setTimeout> | undefined
   let selectionWatcher: ReturnType<typeof watch> | undefined
   let selectionTimer: ReturnType<typeof setTimeout> | undefined
+  let activeWatcher: ReturnType<typeof watch> | undefined
+  let activeTimer: ReturnType<typeof setTimeout> | undefined
+
+  function modelKey(providerID: string, modelID: string): string {
+    return `${providerID}/${modelID}`
+  }
 
   function applySelection() {
-    const sel = readJson<TuiSelection>(SELECTION_PATH)
+    const sel = readJson<TuiSelection>(paths.selection)
     if (!sel?.providerID) return
     telemetry.overrideSelection({ provider: sel.providerID, model: sel.modelID })
   }
 
-  function watchSelection() {
+  function applyActive() {
+    const active = readJson<ActiveFile>(paths.active)
+    if (!active?.sessionID) return
+    telemetry.setActiveSession(active.sessionID)
+  }
+
+  function watchFiles() {
+    mkdirSync(paths.dir, { recursive: true })
     applySelection()
+    applyActive()
     try {
-      selectionWatcher = watch(STATE_DIR, (_event, filename) => {
+      selectionWatcher = watch(paths.dir, (_event, filename) => {
         if (!filename || basename(String(filename)) !== "selection.json") return
         if (selectionTimer) clearTimeout(selectionTimer)
         selectionTimer = setTimeout(() => {
@@ -74,8 +91,18 @@ const plugin: Plugin = async ({ client }, _options) => {
           recompute()
         }, SELECTION_DEBOUNCE_MS)
       })
+      activeWatcher = watch(paths.dir, (_event, filename) => {
+        if (!filename || basename(String(filename)) !== "active.json") return
+        if (activeTimer) clearTimeout(activeTimer)
+        activeTimer = setTimeout(() => {
+          activeTimer = undefined
+          applyActive()
+          saveHistory()
+          recompute()
+        }, SELECTION_DEBOUNCE_MS)
+      })
     } catch (err) {
-      log(`selection watcher failed: ${String(err)}`)
+      log(`state watcher failed: ${String(err)}`)
     }
   }
 
@@ -96,6 +123,28 @@ const plugin: Plugin = async ({ client }, _options) => {
       log(`session hydrate failed: ${String(err)}`)
     }
     try {
+      const resp = await client.provider.list()
+      const all = Array.isArray(resp.data?.all) ? resp.data.all : []
+      for (const provider of all) {
+        for (const [mid, m] of Object.entries(provider.models ?? {})) {
+          const key = modelKey(provider.id, mid)
+          modelCatalog.set(key, {
+            name: m.name,
+            context: m.limit?.context,
+            output: m.limit?.output,
+            cost: {
+              input: m.cost?.input,
+              output: m.cost?.output,
+              cacheRead: m.cost?.cache_read,
+              cacheWrite: m.cost?.cache_write,
+            },
+          })
+        }
+      }
+    } catch (err) {
+      log(`provider catalog failed: ${String(err)}`)
+    }
+    try {
       const cfg = await client.config.get()
       const providers = (cfg.data?.provider ?? {}) as Record<
         string,
@@ -103,8 +152,14 @@ const plugin: Plugin = async ({ client }, _options) => {
       >
       for (const [pid, p] of Object.entries(providers)) {
         for (const [mid, m] of Object.entries(p.models ?? {})) {
-          modelLimits.set(mid, { context: m.limit?.context, input: m.limit?.input, output: m.limit?.output })
-          if (m.name) modelNames.set(mid, m.name)
+          const key = modelKey(pid, mid)
+          const existing = modelCatalog.get(key) ?? {}
+          modelCatalog.set(key, {
+            ...existing,
+            name: existing.name ?? m.name,
+            context: existing.context ?? m.limit?.context,
+            output: existing.output ?? m.limit?.output,
+          })
         }
       }
     } catch (err) {
@@ -118,7 +173,8 @@ const plugin: Plugin = async ({ client }, _options) => {
     history.prompts = telemetry.finished
     history.lastSelected = telemetry.lastSelected
     history.lastContext = telemetry.contextNow() ?? history.lastContext
-    writeJsonAtomic(HISTORY_PATH, history)
+    history.activeSession = telemetry.activeRoot
+    writeJsonAtomic(paths.history, history)
   }
 
   function refreshQuota() {
@@ -164,15 +220,13 @@ const plugin: Plugin = async ({ client }, _options) => {
     }, RECOMPUTE_DEBOUNCE_MS)
   }
 
-  function usableContext(model: string | undefined): number | null {
-    if (!model) return null
-    const limits = modelLimits.get(model)
-    if (!limits) return null
-    const context = limits.context
+  function usableContext(provider: string | undefined, model: string | undefined): number | null {
+    if (!provider || !model) return null
+    const info = modelCatalog.get(modelKey(provider, model))
+    const context = info?.context
     if (!context || context === 0) return null
-    const reserved = Math.min(COMPACTION_BUFFER, limits.output ?? 20_000)
-    if (limits.input) return Math.max(0, limits.input - reserved)
-    return Math.max(0, context - (limits.output ?? 20_000))
+    const reserved = Math.min(COMPACTION_BUFFER, info.output ?? 20_000)
+    return Math.max(0, context - reserved)
   }
 
   function recompute() {
@@ -184,16 +238,15 @@ const plugin: Plugin = async ({ client }, _options) => {
       windows: history.windows,
       selected,
       contextNow: telemetry.contextNow(),
-      usableContext: usableContext(selected.model),
+      usableContext: usableContext(selected.provider, selected.model),
       externalShare: history.externalShare,
-      modelLabel: selected.model ? (modelNames.get(selected.model) ?? selected.model) : undefined,
     }
     const estimate: EstimateFile = computeEstimate(input)
-    writeJsonAtomic(ESTIMATE_PATH, estimate)
+    writeJsonAtomic(paths.estimate, estimate)
   }
 
   pollTimer = setInterval(refreshQuota, POLL_INTERVAL_MS)
-  watchSelection()
+  watchFiles()
   void init()
 
   return {
@@ -215,7 +268,9 @@ const plugin: Plugin = async ({ client }, _options) => {
       if (pollTimer) clearInterval(pollTimer)
       if (recomputeTimer) clearTimeout(recomputeTimer)
       if (selectionTimer) clearTimeout(selectionTimer)
+      if (activeTimer) clearTimeout(activeTimer)
       if (selectionWatcher) selectionWatcher.close()
+      if (activeWatcher) activeWatcher.close()
       telemetry.finalizeAll()
       saveHistory()
       recompute()

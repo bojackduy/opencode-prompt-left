@@ -36,9 +36,9 @@ prompts left               = simulate prompts forward:
 
 | Compact line | Meaning |
 |---|---|
-| `≈14 prompts · Weekly` | calibrated forecast, green/yellow/red by remaining capacity |
-| `7% left · Weekly` | cost forecast ready, waiting for quota-rate observations — calibrating |
-| `≈4 prompts · Monthly` (muted) | cold-start prior (1.5–2.5pp/prompt) — no usage history yet, low confidence |
+| `opencode-go/deepseek-v4-flash ≈14 prompts · Weekly` | calibrated forecast, green/yellow/red by remaining capacity |
+| `opencode-go/deepseek-v4-flash ≈2 prompts · Weekly` (low confidence) | prior estimate (1.5–2.5pp/prompt) — no quota-rate observations yet for this directory; replaced automatically once a quota % change is observed |
+| `≈4 prompts · Monthly` (muted) | cold-start prior — no usage history at all yet |
 | `no quota` | no usable quota export found |
 
 `/prompts-left` opens the full breakdown: best/safe counts, binding window + reset countdown, per-provider windows, forecast per prompt (cost, requests, tools, cache), context/compaction horizon, and calibration stats.
@@ -59,6 +59,36 @@ model picker → TUI writes ~/.local/share/opencode/model.json (recent[0] = sele
 | Favorite model cycle (`model.cycle_favorite`) | ✅ instant (it also saves `recent`) |
 | Tab cycle (`model.cycle_recent`) | ⚠️ at prompt-submit — the TUI writes nothing for this one, so there is nothing to observe |
 | Prompt submit | ✅ always (server `chat.message` hook) |
+
+## Model and provider tracking
+
+The estimate follows the **session you're currently viewing**, not a global "current model":
+
+| Signal | How it works |
+|---|---|
+| Active session | The TUI plugin writes `active.json` with the session it renders; the server resolves selection, context, and calibration against it — switching sessions recomputes instantly |
+| Prompt submit | `chat.message` records the real per-prompt model/provider/agent per session |
+| Model picker bridge | `model.json` `recent[0]` → `selection.json` → applied to the **active** session |
+| Model catalog | `client.provider.list()` — real names + context limits + pricing for every model (including auto-detected providers like `opencode-go`) |
+| Persisted | last active session + selection survive restarts |
+
+## Multi-directory isolation
+
+opencode-prompt-left runs one plugin instance per opencode process, and every instance (one per project directory, even simultaneously) keeps its own state:
+
+```
+$XDG_CACHE_HOME/opencode/prompt-left/<workspace-hash>/
+  history.json      prompt usage + quota-rate observations for THIS directory
+  estimate.json     the current estimate for THIS directory
+  selection.json    model-picker bridge for THIS directory
+  active.json       which session is open in THIS directory
+```
+
+The workspace hash is derived from the project directory, so:
+
+- Running several directories **at the same time** never races on shared files — no cross-talk, no flicker.
+- Each directory calibrates its own workload and quota rates (cold-starts per directory; that's the price of accuracy).
+- Sessions with different models inside one directory each keep their own selection, and the estimate follows whichever one you have open.
 
 ## Coexisting with opencode-quota
 
@@ -98,7 +128,7 @@ Either way both plugins stay fully enabled.
 }
 ```
 
-Restart OpenCode. State persists at `$XDG_CACHE_HOME/opencode/prompt-left/`:
+Restart OpenCode. State persists per project directory at `$XDG_CACHE_HOME/opencode/prompt-left/<workspace-hash>/`:
 
 - `history.json` — root-prompt usage telemetry and per-window quota-rate observations (survives restarts)
 - `estimate.json` — the current estimate, consumed by the TUI

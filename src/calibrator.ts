@@ -243,7 +243,40 @@ export interface EstimateInput {
   contextNow: number | null
   usableContext: number | null
   externalShare: number
-  modelLabel?: string
+}
+
+function compactPrefix(selected: SelectedRegime): string {
+  if (selected.provider && selected.model) return `${selected.provider}/${selected.model} `
+  return ""
+}
+
+function priorEstimate(base: EstimateFile, selectedProviderEntries: QuotaSnapshot["entries"], quotaAgeSec: number): EstimateFile {
+  let binding: EstimateFile["binding"] = null
+  let bindingPrompts = Number.POSITIVE_INFINITY
+  for (const e of selectedProviderEntries) {
+    const remaining = e.percentRemaining ?? 0
+    const prompts = Math.floor(remaining / PRIOR_BURN_SAFE)
+    if (prompts < bindingPrompts) {
+      bindingPrompts = prompts
+      binding = {
+        provider: e.provider,
+        window: e.window ?? e.name,
+        remaining,
+        burnPP: null,
+        resetAt: e.resetAt,
+      }
+    }
+  }
+  base.status = "ready"
+  base.compact = binding ? `${compactPrefix(base.selected)}≈${Math.floor(bindingPrompts)} prompts · ${binding.window}` : "quota unknown"
+  base.likely = binding ? Math.floor(binding.remaining / PRIOR_BURN_MEAN) : null
+  base.safe = binding ? Math.floor(bindingPrompts) : null
+  base.binding = binding
+  base.confidence = 0.2 * Math.max(0, 1 - quotaAgeSec / 1800)
+  base.confidenceLabel = confidenceLabel(base.confidence)
+  base.calibration.usingPrior = true
+  base.calibration.fallbackLevel = 3
+  return base
 }
 
 export function computeEstimate(input: EstimateInput): EstimateFile {
@@ -314,33 +347,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   }
 
   if (!forecast) {
-    let binding: EstimateFile["binding"] = null
-    let bindingPrompts = Number.POSITIVE_INFINITY
-    for (const e of selectedProviderEntries) {
-      const remaining = e.percentRemaining ?? 0
-      const prompts = Math.floor(remaining / PRIOR_BURN_SAFE)
-      if (prompts < bindingPrompts) {
-        bindingPrompts = prompts
-        binding = {
-          provider: e.provider,
-          window: e.window ?? e.name,
-          remaining,
-          burnPP: null,
-          resetAt: e.resetAt,
-        }
-      }
-    }
-    base.status = "ready"
-    base.compact = binding ? `≈${Math.floor(bindingPrompts)} prompts · ${binding.window}` : "quota unknown"
-    base.likely = binding ? Math.floor(binding.remaining / PRIOR_BURN_MEAN) : null
-    base.safe = binding ? Math.floor(bindingPrompts) : null
-    base.binding = binding
-    base.confidence = 0.3 * Math.max(0, 1 - quotaAgeSec / 1800)
-    base.confidenceLabel = confidenceLabel(base.confidence)
-    base.calibration.usingPrior = true
-    base.calibration.fallbackLevel = 3
-    base.compact = labelCompact(base.compact, input.modelLabel)
-    return base
+    return priorEstimate(base, selectedProviderEntries, quotaAgeSec)
   }
 
   const { fallbackLevel } = recentPrompts(input.prompts, selected)
@@ -348,7 +355,6 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   let binding: EstimateFile["binding"] = null
   let bindingPrompts = Number.POSITIVE_INFINITY
   let bindingSafe: number | null = null
-  let bindingRate: number | null = null
   let totalObs = 0
   let bindingCv = 0
   for (const e of selectedProviderEntries) {
@@ -376,7 +382,6 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
     if (best !== null && best < bindingPrompts) {
       bindingPrompts = best
       bindingSafe = safe
-      bindingRate = stats?.median ?? null
       bindingCv = stats?.cv ?? 0
       binding = {
         provider: e.provider,
@@ -389,23 +394,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   }
 
   if (binding === null) {
-    const worst = selectedProviderEntries.reduce((a, b) =>
-      (a.percentRemaining ?? 0) <= (b.percentRemaining ?? 0) ? a : b,
-    )
-    base.status = "calibrating"
-    base.compact = `${(worst.percentRemaining ?? 0).toFixed(0)}% left · ${worst.window ?? worst.name}`
-    base.binding = {
-      provider: worst.provider,
-      window: worst.window ?? worst.name,
-      remaining: worst.percentRemaining ?? 0,
-      burnPP: null,
-      resetAt: worst.resetAt,
-    }
-    base.confidence = 0.2 * Math.max(0, 1 - quotaAgeSec / 1800)
-    base.confidenceLabel = confidenceLabel(base.confidence)
-    base.calibration.rateObs = 0
-    base.compact = labelCompact(base.compact, input.modelLabel)
-    return base
+    return priorEstimate(base, selectedProviderEntries, quotaAgeSec)
   }
 
   const confidence = confidenceScore({
@@ -416,7 +405,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
     cv: bindingCv,
   })
   base.status = "ready"
-  base.compact = `≈${bindingPrompts} prompts · ${binding.window}`
+  base.compact = `${compactPrefix(selected)}≈${bindingPrompts} prompts · ${binding.window}`
   base.likely = bindingPrompts
   base.safe = bindingSafe
   base.confidence = confidence
@@ -424,11 +413,5 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   base.binding = binding
   base.calibration.fallbackLevel = fallbackLevel
   base.calibration.rateObs = totalObs
-  base.compact = labelCompact(base.compact, input.modelLabel)
   return base
-}
-
-function labelCompact(compact: string, modelLabel?: string): string {
-  if (!modelLabel) return compact
-  return `${modelLabel} ${compact}`
 }

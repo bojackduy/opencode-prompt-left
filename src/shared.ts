@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
@@ -5,11 +6,28 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 export const CACHE_BASE = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "opencode")
 
 export const STATE_DIR = join(CACHE_BASE, "prompt-left")
-export const HISTORY_PATH = join(STATE_DIR, "history.json")
-export const ESTIMATE_PATH = join(STATE_DIR, "estimate.json")
-export const SELECTION_PATH = join(STATE_DIR, "selection.json")
 export const QUOTA_EXPORT_PATH = join(CACHE_BASE, "quota-export.json")
 export const QUOTA_STATE_DIR = join(CACHE_BASE, "quota-provider-state")
+
+export function workspaceKey(root: string): string {
+  return createHash("sha1").update(root).digest("hex").slice(0, 12)
+}
+
+export function statePaths(key: string) {
+  const dir = join(STATE_DIR, key)
+  return {
+    dir,
+    history: join(dir, "history.json"),
+    estimate: join(dir, "estimate.json"),
+    selection: join(dir, "selection.json"),
+    active: join(dir, "active.json"),
+  }
+}
+
+export interface ActiveFile {
+  sessionID: string
+  at: number
+}
 
 export interface TuiSelection {
   providerID: string
@@ -98,6 +116,7 @@ export interface HistoryState {
   windows: Record<string, WindowTracker>
   lastSelected?: SelectedRegime
   lastContext?: number
+  activeSession?: string
   externalShare: number
 }
 

@@ -25,6 +25,7 @@ export class Telemetry {
   finished: RootPrompt[] = []
   lastSelected?: SelectedRegime
   latestRoot?: string
+  activeRoot?: string
 
   constructor(history: HistoryState) {
     this.finished = history.prompts ?? []
@@ -295,9 +296,17 @@ export class Telemetry {
     return total
   }
 
+  setActiveSession(sessionID: string): void {
+    if (!this.rootSessions.has(sessionID) && !this.sessionRoot.has(sessionID)) return
+    const root = this.resolveRoot(sessionID)
+    this.activeRoot = root
+    this.latestRoot = root
+  }
+
   contextNow(): number | null {
-    if (!this.latestRoot) return null
-    return this.lastContext.get(this.latestRoot) ?? null
+    const root = this.activeRoot ?? this.latestRoot
+    if (!root) return null
+    return this.lastContext.get(root) ?? null
   }
 
   noteSelection(sessionID: string, sel: SelectedRegime): void {
@@ -310,13 +319,15 @@ export class Telemetry {
 
   overrideSelection(sel: SelectedRegime): void {
     if (!sel.provider) return
-    if (this.latestRoot) this.selected.set(this.latestRoot, sel)
+    const root = this.activeRoot ?? this.latestRoot
+    if (root) this.selected.set(root, sel)
     this.lastSelected = sel
   }
 
   activeSelected(): SelectedRegime {
-    if (this.latestRoot) {
-      const sel = this.selected.get(this.latestRoot)
+    const root = this.activeRoot ?? this.latestRoot
+    if (root) {
+      const sel = this.selected.get(root)
       if (sel?.provider) return sel
     }
     return this.lastSelected ?? {}

@@ -199,7 +199,7 @@ describe("computeEstimate", () => {
     expect(est.perProvider).toHaveLength(2)
   })
 
-  test("calibrating when cost is known but quota rates are not", () => {
+  test("prior-based estimate when cost is known but quota rates are not", () => {
     const est = computeEstimate({
       now: 1_000_010,
       quota,
@@ -210,9 +210,11 @@ describe("computeEstimate", () => {
       usableContext: null,
       externalShare: 0,
     })
-    expect(est.status).toBe("calibrating")
-    expect(est.compact).toContain("% left")
-    expect(est.likely).toBeNull()
+    expect(est.status).toBe("ready")
+    expect(est.calibration.usingPrior).toBe(true)
+    expect(est.likely).toBe(Math.floor(7 / 1.5))
+    expect(est.safe).toBe(Math.floor(7 / 2.5))
+    expect(est.compact).toBe(`opencode-go/m ≈${Math.floor(7 / 2.5)} prompts · Weekly`)
   })
 
   test("cold start uses a prior burn when no prompts exist", () => {

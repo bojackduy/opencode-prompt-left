@@ -1,18 +1,21 @@
 /** @jsxImportSource @opentui/solid */
 import type { JSX } from "@opentui/solid"
 import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
-import { Show, For, createMemo, createSignal, onCleanup } from "solid-js"
+import { Show, For, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { readFileSync, watch, writeFileSync, renameSync, mkdirSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
-import { ESTIMATE_PATH, SELECTION_PATH, type EstimateFile, type TuiSelection } from "./shared"
+import { statePaths, workspaceKey, type ActiveFile, type EstimateFile, type TuiSelection } from "./shared"
 
 const POLL_INTERVAL_MS = 2_500
 const SLOT_ORDER = 95
 const SELECTION_DEBOUNCE_MS = 300
+const ACTIVE_WRITE_MS = 2_500
+
+const paths = statePaths(workspaceKey(process.cwd()))
 
 function loadEstimate(): EstimateFile | null {
   try {
-    return JSON.parse(readFileSync(ESTIMATE_PATH, "utf8")) as EstimateFile
+    return JSON.parse(readFileSync(paths.estimate, "utf8")) as EstimateFile
   } catch {
     return null
   }
@@ -38,7 +41,16 @@ function quotaRendersPrompt(api: Parameters<TuiPlugin>[0]): boolean {
 
 function writeSelection(path: string, model: { providerID: string; modelID: string }, last: { value: string }): void {
   const sel: TuiSelection = { providerID: model.providerID, modelID: model.modelID, at: Date.now() }
-  const serialized = JSON.stringify(sel)
+  writeAtomic(path, sel, last)
+}
+
+function writeActive(path: string, sessionID: string, last: { value: string }): void {
+  const active: ActiveFile = { sessionID, at: Date.now() }
+  writeAtomic(path, active, last)
+}
+
+function writeAtomic(path: string, value: unknown, last: { value: string }): void {
+  const serialized = JSON.stringify(value)
   if (serialized === last.value) return
   last.value = serialized
   try {
@@ -65,7 +77,7 @@ function watchModelSelection(api: Parameters<TuiPlugin>[0]): () => void {
   const last = { value: "" }
   const push = () => {
     const model = readRecentModel(modelPath)
-    if (model) writeSelection(SELECTION_PATH, model, last)
+    if (model) writeSelection(paths.selection, model, last)
   }
   push()
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -90,7 +102,6 @@ function compactFg(e: EstimateFile, api: Parameters<TuiPlugin>[0]) {
   const t = api.theme.current
   if (e.status !== "ready") return t.textMuted
   const n = e.likely ?? 0
-  if (e.calibration.usingPrior) return t.textMuted
   if (n >= 5) return t.success
   if (n >= 2) return t.warning
   return t.error
@@ -121,6 +132,13 @@ function PromptArea(props: {
   ref?: (ref: unknown) => void
 }) {
   const quotaActive = createMemo(() => quotaRendersPrompt(props.api))
+  const activeLast = { value: "" }
+  const writeActiveNow = () => writeActive(paths.active, props.sessionID, activeLast)
+  onMount(() => {
+    writeActiveNow()
+    const timer = setInterval(writeActiveNow, ACTIVE_WRITE_MS)
+    onCleanup(() => clearInterval(timer))
+  })
   return (
     <box gap={0}>
       <Show when={!quotaActive()}>
