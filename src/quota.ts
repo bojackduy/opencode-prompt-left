@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs"
-import { basename, join } from "node:path"
+import { join } from "node:path"
 import type { QuotaEntry, QuotaSnapshot } from "./shared"
 import { QUOTA_EXPORT_PATH, QUOTA_STATE_DIR, readJson } from "./shared"
 
@@ -23,6 +23,8 @@ interface ExportFile {
 }
 
 interface ProviderStateFile {
+  version?: number
+  packageVersion?: string
   providerId?: string
   timestamp?: number
   result?: {
@@ -42,6 +44,15 @@ function windowFromName(name: string, group?: string): string | undefined {
     if (rest) return rest
   }
   return name.includes(" ") ? name : undefined
+}
+
+function versionOf(raw: ProviderStateFile | null): number {
+  if (!raw?.packageVersion) return 0
+  const parts = raw.packageVersion.split(".").map((x) => {
+    const n = Number.parseInt(x, 10)
+    return Number.isFinite(n) ? n : 0
+  })
+  return (parts[0] ?? 0) * 1_000_000 + (parts[1] ?? 0) * 1_000 + (parts[2] ?? 0)
 }
 
 export function readQuotaExportFile(path: string): QuotaSnapshot | null {
@@ -73,18 +84,37 @@ export function readProviderStateDir(dir: string): QuotaSnapshot | null {
   } catch {
     return null
   }
-  const entries: QuotaEntry[] = []
-  let latest = 0
+  const best = new Map<string, { raw: ProviderStateFile; version: number }>()
   for (const file of files) {
     const raw = readJson<ProviderStateFile>(join(dir, file))
     if (!raw?.providerId) continue
+    const version = versionOf(raw)
+    const existing = best.get(raw.providerId)
+    if (
+      existing &&
+      ((raw.timestamp ?? 0) < (existing.raw.timestamp ?? 0) ||
+        ((raw.timestamp ?? 0) === (existing.raw.timestamp ?? 0) && version < existing.version))
+    ) {
+      continue
+    }
+    best.set(raw.providerId, { raw, version })
+  }
+  const entries: QuotaEntry[] = []
+  const seen = new Set<string>()
+  let latest = 0
+  for (const { raw } of best.values()) {
+    const providerId = raw.providerId!
     for (const e of raw.result?.entries ?? []) {
       if (e.unlimited) continue
-      if (typeof e.percentRemaining !== "number") continue
+      if (typeof e.percentRemaining !== "number" || !Number.isFinite(e.percentRemaining)) continue
+      const name = e.name ?? providerId
+      const dedupeKey = `${providerId}::${name}`
+      if (seen.has(dedupeKey)) continue
+      seen.add(dedupeKey)
       entries.push({
-        provider: raw.providerId,
-        name: e.name ?? basename(file, ".json"),
-        window: windowFromName(e.name ?? "", e.group),
+        provider: providerId,
+        name,
+        window: windowFromName(name, e.group),
         percentRemaining: e.percentRemaining,
         resetAt: e.resetTimeIso ? Date.parse(e.resetTimeIso) : undefined,
       })

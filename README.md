@@ -1,35 +1,47 @@
 # opencode-prompt-left
 
-Estimates how many **similar prompts** remain before your provider quota runs out, shown right in the OpenCode compact line (next to the prompt box).
+Estimates how many **similar prompts** remain before your provider quota runs out, shown in the OpenCode compact line (next to the prompt box).
 
 ```
-≈6 prompts · Weekly            ← compact line (safe estimate)
+≈14 prompts · Weekly            ← compact line (best estimate)
 ```
 
-The number is not a token guess. It is `quota remaining ÷ observed quota burn per root prompt`, calibrated from real quota deltas reported by [opencode-quota](https://github.com/slkiser/opencode-quota) and OpenCode's per-message token/cache/tool/child-session telemetry.
+The number is a forward forecast of your own usage: recent per-prompt workload (cost, requests, tokens in/out, cache read/write, tool calls, subagents), projected against the current context/compaction state, then converted to quota burn using the observed percentage-per-dollar rate of each quota window.
 
 ## Core formula
 
 ```
-prompts left ≈ floor( percentRemaining / P90(burn per similar root prompt) )
+predicted cost per prompt  = recency-weighted EWMA of recent root-prompt costs
+                             (cost, requests, tokens in/out/reasoning, cache r/w,
+                              tool calls, tool output, child sessions)
+
+quota rate per window      = observed Δpercent / local OpenCode cost spent
+                             since that window last changed (per window!)
+
+burn per prompt            = predicted cost × quota rate
+
+prompts left               = simulate prompts forward:
+                             context grows per prompt → compaction resets it to
+                             summary+tail and adds compaction cost → repeat
+                             until any quota window hits zero
 ```
 
-- A **root prompt** is one top-level user message, including everything it spawned: steps, tool calls, retries, compaction, and child/subagent sessions.
-- **Burn** is quota percentage points actually consumed, attributed across root prompts by their relative workload (tokens, cache read/write, requests).
-- The **safe** estimate uses a one-sided ~90th-percentile bound on recent burn; the likely estimate uses the mean.
-- The binding constraint is the minimum across the selected provider's quota windows (e.g. 5h wins over weekly).
-- Model/provider/agent switches recompute immediately using that regime's own burn history, with a fallback hierarchy (`provider|model|agent → provider|model → provider → global`) and a confidence penalty for each fallback step.
-- Confidence combines sample coverage, quota freshness, attribution purity (external burn detection), and workload stability.
+- A **root prompt** is one top-level user message, including everything it spawned: tool loops, retries, child/subagent sessions, and compaction.
+- Workload comes from OpenCode's exact `step-finish` usage records (per-request tokens and cost), deduplicated — not cumulative message snapshots.
+- Each quota window (5h / Weekly / Monthly) has its own rate. Rates are computed only from percentage changes that coincide with local usage; zero-delta polls keep accumulating cost so unchanged percentages are never miscounted as free prompts.
+- Compaction: the trigger threshold mirrors OpenCode's own overflow check (`context tokens ≥ usable`), and post-compaction context is modeled as summary + ~25% retained tail (2k–15k tokens).
+- The compact line shows the **best estimate**; the detail view also shows a conservative bound, confidence, and the full forecast breakdown.
 
 ## Status
 
 | Compact line | Meaning |
 |---|---|
-| `≈6 prompts · Weekly` | calibrated estimate, green/yellow/red by remaining capacity |
-| `≈4 prompts · Monthly` (muted) | cold-start prior (1.5–2.5pp/prompt) — no burn samples yet, low confidence |
+| `≈14 prompts · Weekly` | calibrated forecast, green/yellow/red by remaining capacity |
+| `7% left · Weekly` | cost forecast ready, waiting for quota-rate observations — calibrating |
+| `≈4 prompts · Monthly` (muted) | cold-start prior (1.5–2.5pp/prompt) — no usage history yet, low confidence |
 | `no quota` | no usable quota export found |
 
-`/prompts-left` opens a full breakdown: likely/safe counts, binding window + reset countdown, per-provider windows, context/compaction estimate, and calibration stats.
+`/prompts-left` opens the full breakdown: best/safe counts, binding window + reset countdown, per-provider windows, forecast per prompt (cost, requests, tools, cache), context/compaction horizon, and calibration stats.
 
 ## Model-switch hot update
 
@@ -55,7 +67,7 @@ prompt-left renders its line at the bottom, directly below opencode-quota's comp
 ```
 [ prompt input box        ]
 Copilot 94% | OpenAI 5h 100%   ← opencode-quota
-≈6 prompts · Weekly            ← prompt-left
+≈14 prompts · Weekly           ← prompt-left
 ```
 
 - If opencode-quota owns the prompt bar (`tuiCompactStatus.sessionPrompt: true`), prompt-left appends only its line below quota's.
@@ -88,7 +100,7 @@ Either way both plugins stay fully enabled.
 
 Restart OpenCode. State persists at `$XDG_CACHE_HOME/opencode/prompt-left/`:
 
-- `history.json` — root-turn telemetry and calibrated burn samples (survives restarts)
+- `history.json` — root-prompt usage telemetry and per-window quota-rate observations (survives restarts)
 - `estimate.json` — the current estimate, consumed by the TUI
 
 ## Development
@@ -101,7 +113,8 @@ bun test
 
 ## Notes and limitations
 
-- Estimates are statistical. "≈N similar prompts" means *if you keep prompting like your recent root prompts do*.
-- Quota observations arrive at opencode-quota's refresh interval (~5 min), so burn attribution happens per observation interval, not per prompt.
+- Estimates are statistical. "≈N similar prompts" means *if you keep prompting like your recent root prompts do, in the current context state*.
+- Quota-rate calibration needs at least one observable percentage change on the selected provider's windows; until then the compact line shows the remaining percentage and the forecast cost.
+- Quota observations arrive at opencode-quota's refresh interval (~5 min), so rate observations are per interval, not per prompt.
 - Quota used by other machines/windows is detected as external burn and lowers confidence.
 - A window can reset before you exhaust it at your pace; the detail view shows reset countdowns.

@@ -1,159 +1,228 @@
 import { describe, expect, test } from "bun:test"
-import type { Event } from "@opencode-ai/sdk"
+import type { Event, Message, Part } from "@opencode-ai/sdk"
 import { Telemetry } from "./telemetry"
-import { freshHistory } from "./shared"
+import { freshHistory, type RootPrompt } from "./shared"
 
-function assistantMsg(overrides: Record<string, unknown> = {}) {
+function evt(type: string, properties: Record<string, unknown>): Event {
+  return { type, properties } as unknown as Event
+}
+
+function sessionCreated(id: string, parentID?: string): Event {
+  return evt("session.created", { info: { id, parentID } })
+}
+
+function assistantMsg(overrides: Record<string, unknown> = {}): Message {
   return {
-    id: `a-${Math.random()}`,
+    id: `msg_${Math.random().toString(36).slice(2, 10)}`,
     sessionID: "root",
     role: "assistant",
-    parentID: "u1",
-    modelID: "gpt",
-    providerID: "openai",
+    time: { created: Date.now() },
+    parentID: "user1",
+    modelID: "deepseek-v4-pro",
+    providerID: "opencode-go",
     mode: "build",
-    cost: 0.01,
-    time: { created: 10 },
-    tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 50, write: 2 } },
     path: { cwd: "/", root: "/" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     ...overrides,
   }
 }
 
-function userMsg(overrides: Record<string, unknown> = {}) {
+function stepFinish(overrides: Record<string, unknown> = {}): Part {
   return {
-    id: `u-${Math.random()}`,
+    id: `part_${Math.random().toString(36).slice(2, 10)}`,
     sessionID: "root",
-    role: "user",
-    parentID: "a0",
-    time: { created: 0 },
+    messageID: "msg1",
+    type: "step-finish",
+    reason: "stop",
+    cost: 0.01,
+    tokens: { input: 1000, output: 100, reasoning: 0, cache: { read: 4000, write: 0 } },
     ...overrides,
   }
 }
 
-function evt(type: Event["type"], properties: unknown): Event {
-  return { type, properties } as Event
+function toolPart(overrides: Record<string, unknown> = {}): Part {
+  return {
+    id: `part_${Math.random().toString(36).slice(2, 10)}`,
+    sessionID: "root",
+    messageID: "msg1",
+    type: "tool",
+    tool: "bash",
+    callID: "call1",
+    state: {
+      status: "completed",
+      input: {},
+      output: "abcdefgh",
+      title: "bash",
+      metadata: {},
+      time: { start: 1, end: 2 },
+    },
+    ...overrides,
+  }
 }
 
-function seedRoot(): { t: Telemetry; u: ReturnType<typeof userMsg> } {
-  const t = new Telemetry(freshHistory())
-  t.handle(evt("session.created", { info: { id: "root" } }))
-  const u = userMsg()
-  t.handle(evt("message.updated", { info: u }))
-  return { t, u }
+function prompt(id: string, overrides: Partial<RootPrompt> = {}): RootPrompt {
+  return {
+    id,
+    rootSessionID: "root",
+    startedAt: 1000,
+    finishedAt: 2000,
+    contextBefore: 0,
+    compacted: false,
+    compactionCost: 0,
+    childSessions: 0,
+    byProvider: {},
+    ...overrides,
+  }
+}
+
+function seed(t: Telemetry) {
+  t.handle(sessionCreated("root"))
 }
 
 describe("Telemetry", () => {
-  test("aggregates tokens, requests and cost into a root turn", () => {
-    const { t } = seedRoot()
-    t.handle(evt("message.updated", { info: assistantMsg() }))
-    t.handle(evt("message.updated", { info: assistantMsg() }))
-    t.handle(evt("session.idle", { sessionID: "root" }))
+  test("step-finish parts accumulate usage once per part id", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    t.beginPrompt("root", "build", "opencode-go", "deepseek-v4-pro")
+    const p = stepFinish({ id: "sf1", messageID: "m1", cost: 0.02, tokens: { input: 500, output: 50, reasoning: 0, cache: { read: 2000, write: 0 } } })
+    t.handle(evt("message.updated", { info: assistantMsg({ id: "m1" }) }))
+    t.handle(evt("message.part.updated", { part: p }))
+    t.handle(evt("message.part.updated", { part: p }))
+    t.finalizeAll()
+    const finished = t.finished.at(-1)!
+    const u = finished.byProvider["opencode-go"]
+    expect(u.requests).toBe(1)
+    expect(u.cost).toBeCloseTo(0.02)
+    expect(u.input).toBe(500)
+    expect(u.cacheRead).toBe(2000)
+    expect(finished.contextAfter).toBe(2500)
+  })
+
+  test("tool completions count once with output chars", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    t.beginPrompt("root", "build", "opencode-go", "m")
+    const tool = toolPart({ id: "t1", messageID: "m1" })
+    t.handle(evt("message.updated", { info: assistantMsg({ id: "m1" }) }))
+    t.handle(evt("message.part.updated", { part: tool }))
+    t.handle(evt("message.part.updated", { part: tool }))
+    t.finalizeAll()
+    const u = t.finished.at(-1)!.byProvider["opencode-go"]
+    expect(u.toolCalls).toBe(1)
+    expect(u.toolOutputChars).toBe(8)
+  })
+
+  test("child session usage attributes to the active root prompt", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    t.beginPrompt("root", "build", "opencode-go", "m")
+    t.handle(sessionCreated("child", "root"))
+    t.handle(evt("message.updated", { info: assistantMsg({ id: "c1", sessionID: "child" }) }))
+    t.handle(evt("message.part.updated", { part: stepFinish({ id: "sf2", messageID: "c1", sessionID: "child", cost: 0.05, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }) }))
+    t.finalizeAll()
+    const finished = t.finished.at(-1)!
+    expect(finished.byProvider["opencode-go"].cost).toBeCloseTo(0.05)
+    expect(finished.childSessions).toBe(1)
+  })
+
+  test("beginPrompt finalizes the previous prompt with its context", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    t.beginPrompt("root", "build", "opencode-go", "m")
+    t.handle(evt("message.part.updated", { part: stepFinish({ id: "sf1", tokens: { input: 100, output: 0, reasoning: 0, cache: { read: 900, write: 0 } } }) }))
+    t.beginPrompt("root", "build", "opencode-go", "m")
     expect(t.finished).toHaveLength(1)
-    const turn = t.finished[0]
-    expect(turn.rootMessageID).toBeDefined()
-    const totals = turn.byProvider["openai"]
-    expect(totals.requests).toBe(2)
-    expect(totals.input).toBe(200)
-    expect(totals.output).toBe(40)
-    expect(totals.cacheRead).toBe(100)
-    expect(totals.cost).toBeCloseTo(0.02)
+    const first = t.finished[0]
+    expect(first.finishedAt).toBeDefined()
+    expect(first.contextAfter).toBe(1000)
+    const second = t.activeSelected()
+    expect(second.model).toBe("m")
   })
 
-  test("child session usage rolls up into the root turn", () => {
-    const { t } = seedRoot()
-    t.handle(evt("session.created", { info: { id: "child", parentID: "root" } }))
-    t.handle(evt("message.updated", { info: assistantMsg({ sessionID: "child", providerID: "anthropic", modelID: "opus" }) }))
-    t.handle(evt("message.updated", { info: assistantMsg({ sessionID: "child", providerID: "anthropic", modelID: "opus" }) }))
-    t.handle(evt("session.idle", { sessionID: "child" }))
-    t.handle(evt("session.idle", { sessionID: "root" }))
-    expect(t.finished).toHaveLength(1)
-    expect(t.finished[0].childSessions).toBe(1)
-    expect(t.finished[0].byProvider["anthropic"].requests).toBe(2)
-    expect(t.finished[0].provider).toBeUndefined()
+  test("compaction messages flag the owning prompt and capture compaction cost", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    t.beginPrompt("root", "build", "opencode-go", "m")
+    t.handle(evt("message.updated", { info: assistantMsg({ id: "comp", mode: "compaction", summary: true }) }))
+    t.handle(evt("message.part.updated", { part: stepFinish({ id: "sfc", messageID: "comp", cost: 0.3, tokens: { input: 50000, output: 500, reasoning: 0, cache: { read: 0, write: 0 } } }) }))
+    t.finalizeAll()
+    const finished = t.finished.at(-1)!
+    expect(finished.compacted).toBe(true)
+    expect(finished.compactionCost).toBeCloseTo(0.3)
   })
 
-  test("root finalizes only after children idle", () => {
-    const { t } = seedRoot()
-    t.handle(evt("session.created", { info: { id: "child", parentID: "root" } }))
-    t.handle(evt("session.idle", { sessionID: "root" }))
-    expect(t.finished).toHaveLength(0)
-    t.handle(evt("session.idle", { sessionID: "child" }))
-    expect(t.finished).toHaveLength(1)
-  })
-
-  test("nested subagents resolve to the ultimate root", () => {
-    const { t } = seedRoot()
-    t.handle(evt("session.created", { info: { id: "child", parentID: "root" } }))
-    t.handle(evt("session.created", { info: { id: "grandchild", parentID: "child" } }))
-    t.handle(evt("message.updated", { info: assistantMsg({ sessionID: "grandchild", providerID: "anthropic", modelID: "opus" }) }))
-    t.handle(evt("session.idle", { sessionID: "child" }))
-    t.handle(evt("session.idle", { sessionID: "root" }))
-    t.handle(evt("session.idle", { sessionID: "grandchild" }))
-    expect(t.finished).toHaveLength(1)
-    expect(t.finished[0].childSessions).toBe(2)
-    expect(t.finished[0].byProvider["anthropic"].requests).toBe(1)
-  })
-
-  test("new user message finalizes the previous turn lazily", () => {
-    const { t } = seedRoot()
-    t.handle(evt("message.updated", { info: assistantMsg() }))
-    const u2 = userMsg()
-    t.handle(evt("message.updated", { info: u2 }))
-    expect(t.finished).toHaveLength(1)
-    expect(t.finished[0].contextAfter).toBe(177)
-  })
-
-  test("orphan child messages after finalize are ignored", () => {
-    const { t } = seedRoot()
-    t.handle(evt("message.updated", { info: assistantMsg() }))
-    t.handle(evt("session.idle", { sessionID: "root" }))
-    t.handle(evt("session.created", { info: { id: "late", parentID: "root" } }))
-    t.handle(evt("message.updated", { info: assistantMsg({ sessionID: "late" }) }))
-    expect(t.finished).toHaveLength(1)
-    expect(t.finished[0].byProvider["openai"].requests).toBe(1)
-  })
-
-  test("subagent user prompts do not start root turns", () => {
-    const { t } = seedRoot()
-    t.handle(evt("session.created", { info: { id: "child", parentID: "root" } }))
-    t.handle(evt("message.updated", { info: userMsg({ sessionID: "child" }) }))
-    expect(t.finished).toHaveLength(0)
-    t.handle(evt("session.idle", { sessionID: "child" }))
-    t.handle(evt("session.idle", { sessionID: "root" }))
-    expect(t.finished).toHaveLength(1)
-    expect(t.finished[0].childSessions).toBe(1)
-  })
-
-  test("selection only follows the main agent, not subagents", () => {
-    const { t } = seedRoot()
-    t.handle(evt("session.created", { info: { id: "child", parentID: "root" } }))
-    t.handle(evt("message.updated", { info: assistantMsg({ providerID: "openai", modelID: "gpt" }) }))
-    t.handle(evt("message.updated", { info: assistantMsg({ sessionID: "child", providerID: "anthropic", modelID: "opus" }) }))
-    expect(t.activeSelected()).toEqual({ provider: "openai", model: "gpt", agent: "build" })
-  })
-
-  test("overrideSelection hot-swaps the active regime", () => {
-    const { t } = seedRoot()
-    t.handle(evt("message.updated", { info: assistantMsg({ providerID: "openai", modelID: "gpt" }) }))
-    expect(t.activeSelected().model).toBe("gpt")
-    t.overrideSelection({ provider: "anthropic", model: "opus" })
-    expect(t.activeSelected()).toEqual({ provider: "anthropic", model: "opus" })
-    expect(t.lastSelected).toEqual({ provider: "anthropic", model: "opus" })
-  })
-
-  test("compaction flags the open turn", () => {
-    const { t } = seedRoot()
+  test("session.compacted flags the active prompt", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    t.beginPrompt("root", "build", "opencode-go", "m")
     t.handle(evt("session.compacted", { sessionID: "root" }))
-    t.handle(evt("session.idle", { sessionID: "root" }))
-    expect(t.finished[0].compactedSessions).toBe(1)
+    t.finalizeAll()
+    expect(t.finished.at(-1)!.compacted).toBe(true)
   })
 
-  test("context tracks root-session tokens only", () => {
-    const { t } = seedRoot()
-    t.handle(evt("session.created", { info: { id: "child", parentID: "root" } }))
-    t.handle(evt("message.updated", { info: assistantMsg() }))
-    t.handle(evt("message.updated", { info: assistantMsg({ sessionID: "child", tokens: { input: 99999, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }) }))
-    expect(t.contextNow()).toBe(177)
+  test("providerCostSince sums finished cost after the cutoff", () => {
+    const t = new Telemetry(freshHistory())
+    t.finished.push(prompt("p1", { finishedAt: 500, byProvider: { "opencode-go": { ...emptyUsage(), cost: 0.1 } } }))
+    t.finished.push(prompt("p2", { finishedAt: 1500, byProvider: { "opencode-go": { ...emptyUsage(), cost: 0.2 } } }))
+    expect(t.providerCostSince("opencode-go", 1000)).toBeCloseTo(0.2)
+    expect(t.providerCostSince("opencode-go", 0)).toBeCloseTo(0.3)
+  })
+
+  test("user message starts a prompt as fallback; synthetic and compaction users are ignored", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    const real = { id: "u1", sessionID: "root", role: "user", agent: "build", model: { providerID: "opencode-go", modelID: "m" }, time: { created: Date.now() } }
+    t.handle(evt("message.updated", { info: real }))
+    expect(t.activeSelected().provider).toBe("opencode-go")
+    t.finalizeAll()
+    t.handle(evt("message.part.updated", { part: { id: "s1", sessionID: "root", messageID: "u2", type: "text", text: "x", synthetic: true } }))
+    t.handle(evt("message.updated", { info: { ...real, id: "u2" } }))
+    expect(t.finished).toHaveLength(1)
+    t.handle(evt("message.part.updated", { part: { id: "c1", sessionID: "root", messageID: "u3", type: "compaction", auto: true } }))
+    t.handle(evt("message.updated", { info: { ...real, id: "u3" } }))
+    expect(t.finished).toHaveLength(1)
+  })
+
+  test("selection follows noteSelection and overrideSelection", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    t.noteSelection("root", { provider: "opencode-go", model: "m", agent: "build" })
+    expect(t.activeSelected()).toEqual({ provider: "opencode-go", model: "m", agent: "build" })
+    t.overrideSelection({ provider: "openai", model: "gpt" })
+    expect(t.activeSelected().model).toBe("gpt")
+  })
+
+  test("root finalizes on idle only when all children are idle", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    t.beginPrompt("root", "build", "opencode-go", "m")
+    t.handle(sessionCreated("child", "root"))
+    t.handle(evt("session.idle", { sessionID: "root" }))
+    expect(t.finished).toHaveLength(0)
+    t.handle(evt("session.idle", { sessionID: "child" }))
+    t.handle(evt("session.idle", { sessionID: "root" }))
+    expect(t.finished).toHaveLength(1)
+  })
+
+  test("hydrate restores latest root and last context", () => {
+    const t = new Telemetry(freshHistory())
+    t.hydrate([{ id: "a" }, { id: "b" }], 4200)
+    expect(t.latestRoot).toBe("b")
+    expect(t.contextNow()).toBe(4200)
   })
 })
+
+function emptyUsage() {
+  return {
+    requests: 0,
+    input: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    output: 0,
+    reasoning: 0,
+    cost: 0,
+    toolCalls: 0,
+    toolOutputChars: 0,
+  }
+}

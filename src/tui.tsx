@@ -89,10 +89,10 @@ function watchModelSelection(api: Parameters<TuiPlugin>[0]): () => void {
 function compactFg(e: EstimateFile, api: Parameters<TuiPlugin>[0]) {
   const t = api.theme.current
   if (e.status !== "ready") return t.textMuted
-  const safe = e.safe ?? 0
+  const n = e.likely ?? 0
   if (e.calibration.usingPrior) return t.textMuted
-  if (safe >= 5) return t.success
-  if (safe >= 2) return t.warning
+  if (n >= 5) return t.success
+  if (n >= 2) return t.warning
   return t.error
 }
 
@@ -161,28 +161,43 @@ function DetailView(props: { api: Parameters<TuiPlugin>[0]; estimate: () => Esti
       out.push({ text: "prompt-left: waiting for estimate…", fg: theme.textMuted })
       return out
     }
-    const head = e.status === "ready" ? `≈${e.safe} similar prompts left` : e.compact
+    const head = e.status === "ready" && e.likely !== null ? `≈${e.likely} similar prompts left` : e.compact
     out.push({ text: head, fg: theme.text })
     if (e.selected.provider) {
       const regime = [e.selected.model, e.selected.agent].filter(Boolean).join(" · ")
       out.push({ text: `tracking ${e.selected.provider}${regime ? ` · ${regime}` : ""}`, fg: theme.textMuted })
     }
     if (e.status === "ready" && e.likely !== null) {
-      out.push({ text: `likely ${e.likely} · safe ${e.safe} · ${e.confidenceLabel} confidence (${(e.confidence * 100).toFixed(0)}%)`, fg: theme.textMuted })
+      const safe = e.safe !== null ? ` · safe ${e.safe}` : ""
+      out.push({ text: `best ${e.likely}${safe} · ${e.confidenceLabel} confidence (${(e.confidence * 100).toFixed(0)}%)`, fg: theme.textMuted })
     }
     out.push({ text: "", fg: theme.text })
     if (e.binding) {
       out.push({ text: `binding: ${e.binding.provider} · ${e.binding.window}`, fg: theme.text })
-      out.push({ text: `  remaining ${fmtPercent(e.binding.remaining)} · burn ${e.binding.burnMean.toFixed(2)}pp/prompt (safe ${e.binding.burnSafe.toFixed(2)})`, fg: theme.textMuted })
+      const burn = e.binding.burnPP !== null ? ` · burn ${e.binding.burnPP.toFixed(2)}pp/prompt` : ""
+      out.push({ text: `  remaining ${fmtPercent(e.binding.remaining)}${burn}`, fg: theme.textMuted })
       if (e.binding.resetAt) out.push({ text: `  resets in ${fmtCountdown(e.binding.resetAt)}`, fg: theme.textMuted })
     }
     out.push({ text: "", fg: theme.text })
     for (const p of e.perProvider) {
       out.push({ text: p.provider, fg: theme.text })
       for (const w of p.windows) {
-        const label = w.prompts === null ? "unknown" : `≈${w.prompts} prompts`
+        const label = w.prompts === null ? `${fmtPercent(w.remaining)} left` : `≈${w.prompts} prompts`
         const reset = w.resetAt ? ` · reset ${fmtCountdown(w.resetAt)}` : ""
         out.push({ text: `  ${w.window}: ${fmtPercent(w.remaining)} → ${label}${reset}`, fg: theme.textMuted })
+      }
+    }
+    if (e.forecast) {
+      out.push({ text: "", fg: theme.text })
+      out.push({ text: "forecast per prompt", fg: theme.text })
+      const f = e.forecast
+      const cache = f.cacheRead > 0 || f.cacheWrite > 0
+        ? ` · cache r${(f.cacheRead / 1000).toFixed(0)}k/w${(f.cacheWrite / 1000).toFixed(0)}k`
+        : ""
+      out.push({ text: `  cost $${f.cost.toFixed(3)} · ${f.requests.toFixed(1)} requests · ${f.toolCalls.toFixed(1)} tools · ${f.childSessions.toFixed(1)} subagents`, fg: theme.textMuted })
+      out.push({ text: `  in ${(f.input / 1000).toFixed(0)}k +${(f.output / 1000).toFixed(0)}k out +${(f.reasoning / 1000).toFixed(0)}k think${cache}`, fg: theme.textMuted })
+      if (f.compactionRate > 0) {
+        out.push({ text: `  compaction in ~${f.compactionRate >= 1 ? 1 : Math.round(1 / f.compactionRate)} prompts · cost $${f.compactionCost.toFixed(3)}`, fg: theme.textMuted })
       }
     }
     if (e.context.usable !== null || e.context.untilCompaction !== null) {
@@ -196,9 +211,9 @@ function DetailView(props: { api: Parameters<TuiPlugin>[0]; estimate: () => Esti
       }
     }
     out.push({ text: "", fg: theme.text })
-    out.push({ text: `calibration: ${e.calibration.regimeTurns} regime samples · ${e.calibration.rootTurns} root turns · quota age ${Math.round(e.calibration.quotaAgeSec)}s`, fg: theme.textMuted })
+    out.push({ text: `calibration: ${e.forecast?.sampleCount ?? 0} prompt samples · ${e.calibration.rateObs} quota obs · quota age ${Math.round(e.calibration.quotaAgeSec)}s`, fg: theme.textMuted })
     if (e.calibration.usingPrior) out.push({ text: "cold-start prior estimate (1.5–2.5pp/prompt) — calibrates with use", fg: theme.warning })
-    if (e.calibration.fallbackLevel > 0) out.push({ text: `using fallback burn model (level ${e.calibration.fallbackLevel})`, fg: theme.warning })
+    if (e.calibration.fallbackLevel > 0) out.push({ text: `using fallback workload model (level ${e.calibration.fallbackLevel})`, fg: theme.warning })
     if (e.calibration.externalShare > 0.15) out.push({ text: "external quota burn detected — confidence reduced", fg: theme.warning })
     return out
   })

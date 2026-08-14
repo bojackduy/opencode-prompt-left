@@ -17,20 +17,35 @@ export interface TuiSelection {
   at: number
 }
 
-export interface ProviderTotals {
+export interface PromptUsage {
   requests: number
   input: number
-  output: number
-  reasoning: number
   cacheRead: number
   cacheWrite: number
+  output: number
+  reasoning: number
   cost: number
   toolCalls: number
+  toolOutputChars: number
 }
 
-export interface RootTurn {
+export function emptyUsage(): PromptUsage {
+  return {
+    requests: 0,
+    input: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    output: 0,
+    reasoning: 0,
+    cost: 0,
+    toolCalls: 0,
+    toolOutputChars: 0,
+  }
+}
+
+export interface RootPrompt {
+  id: string
   rootSessionID: string
-  rootMessageID: string
   startedAt: number
   finishedAt?: number
   agent?: string
@@ -38,9 +53,10 @@ export interface RootTurn {
   model?: string
   contextBefore: number
   contextAfter?: number
-  byProvider: Record<string, ProviderTotals>
+  compacted: boolean
+  compactionCost: number
   childSessions: number
-  compactedSessions: number
+  byProvider: Record<string, PromptUsage>
 }
 
 export interface QuotaEntry {
@@ -58,9 +74,16 @@ export interface QuotaSnapshot {
   entries: QuotaEntry[]
 }
 
-export interface BurnSample {
+export interface WindowObservation {
   at: number
-  burn: number
+  deltaPct: number
+  localCost: number
+}
+
+export interface WindowTracker {
+  lastPercent?: number
+  lastPercentAt?: number
+  observations: WindowObservation[]
 }
 
 export interface SelectedRegime {
@@ -70,13 +93,40 @@ export interface SelectedRegime {
 }
 
 export interface HistoryState {
-  version: 1
-  turns: RootTurn[]
-  regimeSamples: Record<string, BurnSample[]>
-  lastQuotaSeen: Record<string, number>
-  lastObsAt: Record<string, number>
-  externalShare: number
+  version: 2
+  prompts: RootPrompt[]
+  windows: Record<string, WindowTracker>
   lastSelected?: SelectedRegime
+  lastContext?: number
+  externalShare: number
+}
+
+export function freshHistory(): HistoryState {
+  return {
+    version: 2,
+    prompts: [],
+    windows: {},
+    externalShare: 0,
+  }
+}
+
+export interface PromptForecast {
+  sampleCount: number
+  fallbackLevel: number
+  cost: number
+  requests: number
+  input: number
+  cacheRead: number
+  cacheWrite: number
+  output: number
+  reasoning: number
+  toolCalls: number
+  toolOutputTokens: number
+  childSessions: number
+  contextGrowth: number
+  compactionCost: number
+  compactionRate: number
+  costCv: number
 }
 
 export interface ContextEstimate {
@@ -86,14 +136,17 @@ export interface ContextEstimate {
   untilCompaction: number | null
 }
 
+export interface WindowEstimate {
+  window: string
+  remaining: number
+  ratePP: number | null
+  prompts: number | null
+  resetAt?: number
+}
+
 export interface PerProviderEstimate {
   provider: string
-  windows: {
-    window: string
-    remaining: number
-    prompts: number | null
-    resetAt?: number
-  }[]
+  windows: WindowEstimate[]
 }
 
 export interface EstimateFile {
@@ -109,44 +162,20 @@ export interface EstimateFile {
     provider: string
     window: string
     remaining: number
-    burnMean: number
-    burnSafe: number
+    burnPP: number | null
     resetAt?: number
   } | null
   perProvider: PerProviderEstimate[]
+  forecast: PromptForecast | null
   context: ContextEstimate
   calibration: {
-    rootTurns: number
-    regimeTurns: number
+    prompts: number
     quotaAgeSec: number
     externalShare: number
     fallbackLevel: number
     usingPrior: boolean
+    rateObs: number
   }
-}
-
-export function emptyTotals(): ProviderTotals {
-  return { requests: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0, toolCalls: 0 }
-}
-
-export function freshHistory(): HistoryState {
-  return {
-    version: 1,
-    turns: [],
-    regimeSamples: {},
-    lastQuotaSeen: {},
-    lastObsAt: {},
-    externalShare: 0,
-  }
-}
-
-export function totalTokens(input: {
-  input: number
-  output: number
-  reasoning: number
-  cache: { read: number; write: number }
-}): number {
-  return input.input + input.output + input.reasoning + input.cache.read + input.cache.write
 }
 
 export function readJson<T>(path: string): T | null {
