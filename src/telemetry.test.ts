@@ -133,6 +133,15 @@ describe("Telemetry", () => {
     expect(t.activeSelected()).toEqual({ provider: "openai", model: "gpt", agent: "build" })
   })
 
+  test("overrideSelection hot-swaps the active regime", () => {
+    const { t } = seedRoot()
+    t.handle(evt("message.updated", { info: assistantMsg({ providerID: "openai", modelID: "gpt" }) }))
+    expect(t.activeSelected().model).toBe("gpt")
+    t.overrideSelection({ provider: "anthropic", model: "opus" })
+    expect(t.activeSelected()).toEqual({ provider: "anthropic", model: "opus" })
+    expect(t.lastSelected).toEqual({ provider: "anthropic", model: "opus" })
+  })
+
   test("compaction flags the open turn", () => {
     const { t } = seedRoot()
     t.handle(evt("session.compacted", { sessionID: "root" }))

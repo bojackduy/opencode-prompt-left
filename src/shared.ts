@@ -7,8 +7,15 @@ export const CACHE_BASE = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".c
 export const STATE_DIR = join(CACHE_BASE, "prompt-left")
 export const HISTORY_PATH = join(STATE_DIR, "history.json")
 export const ESTIMATE_PATH = join(STATE_DIR, "estimate.json")
+export const SELECTION_PATH = join(STATE_DIR, "selection.json")
 export const QUOTA_EXPORT_PATH = join(CACHE_BASE, "quota-export.json")
 export const QUOTA_STATE_DIR = join(CACHE_BASE, "quota-provider-state")
+
+export interface TuiSelection {
+  providerID: string
+  modelID: string
+  at: number
+}
 
 export interface ProviderTotals {
   requests: number

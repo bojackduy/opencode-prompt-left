@@ -31,6 +31,23 @@ prompts left ≈ floor( percentRemaining / P90(burn per similar root prompt) )
 
 `/prompts-left` opens a full breakdown: likely/safe counts, binding window + reset countdown, per-provider windows, context/compaction estimate, and calibration stats.
 
+## Model-switch hot update
+
+opencode never publishes a "model changed" event — the selection lives in the TUI's in-memory store and reaches the server only at prompt-submit. prompt-left works around that with a file bridge:
+
+```
+model picker → TUI writes ~/.local/share/opencode/model.json (recent[0] = selection)
+             → prompt-left TUI plugin watches it → writes …/opencode/prompt-left/selection.json
+             → prompt-left server plugin watches it → recomputes immediately
+```
+
+| Switch method | Hot update |
+|---|---|
+| Model picker (enter, or any `set(…, { recent: true })`) | ✅ instant, no prompt needed |
+| Favorite model cycle (`model.cycle_favorite`) | ✅ instant (it also saves `recent`) |
+| Tab cycle (`model.cycle_recent`) | ⚠️ at prompt-submit — the TUI writes nothing for this one, so there is nothing to observe |
+| Prompt submit | ✅ always (server `chat.message` hook) |
+
 ## Coexisting with opencode-quota
 
 prompt-left renders its line at the bottom, directly below opencode-quota's compact line — no quota configuration or patches needed:

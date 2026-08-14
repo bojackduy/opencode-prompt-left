@@ -1,5 +1,7 @@
 import type { Event } from "@opencode-ai/sdk"
 import type { Plugin } from "@opencode-ai/plugin"
+import { watch } from "node:fs"
+import { basename } from "node:path"
 import { Telemetry } from "./telemetry"
 import { readQuotaSnapshot } from "./quota"
 import {
@@ -12,17 +14,21 @@ import {
 import {
   ESTIMATE_PATH,
   HISTORY_PATH,
+  SELECTION_PATH,
+  STATE_DIR,
   freshHistory,
   readJson,
   writeJsonAtomic,
   type ContextEstimate,
   type EstimateFile,
   type HistoryState,
+  type TuiSelection,
 } from "./shared"
 
 const POLL_INTERVAL_MS = 60_000
 const RECOMPUTE_DEBOUNCE_MS = 1_000
 const EXTERNAL_EWMA_ALPHA = 0.3
+const SELECTION_DEBOUNCE_MS = 300
 
 const TRACKED_EVENTS = new Set([
   "session.created",
@@ -43,6 +49,31 @@ const plugin: Plugin = async ({ client }, _options) => {
   let lastSnapAt = 0
   let pollTimer: ReturnType<typeof setInterval> | undefined
   let recomputeTimer: ReturnType<typeof setTimeout> | undefined
+  let selectionWatcher: ReturnType<typeof watch> | undefined
+  let selectionTimer: ReturnType<typeof setTimeout> | undefined
+
+  function applySelection() {
+    const sel = readJson<TuiSelection>(SELECTION_PATH)
+    if (!sel?.providerID) return
+    telemetry.overrideSelection({ provider: sel.providerID, model: sel.modelID })
+  }
+
+  function watchSelection() {
+    applySelection()
+    try {
+      selectionWatcher = watch(STATE_DIR, (_event, filename) => {
+        if (!filename || basename(String(filename)) !== "selection.json") return
+        if (selectionTimer) clearTimeout(selectionTimer)
+        selectionTimer = setTimeout(() => {
+          selectionTimer = undefined
+          applySelection()
+          recompute()
+        }, SELECTION_DEBOUNCE_MS)
+      })
+    } catch (err) {
+      log(`selection watcher failed: ${String(err)}`)
+    }
+  }
 
   function log(msg: string) {
     try {
@@ -155,6 +186,7 @@ const plugin: Plugin = async ({ client }, _options) => {
   }
 
   pollTimer = setInterval(refreshQuota, POLL_INTERVAL_MS)
+  watchSelection()
   void init()
 
   return {
@@ -176,6 +208,8 @@ const plugin: Plugin = async ({ client }, _options) => {
     async dispose() {
       if (pollTimer) clearInterval(pollTimer)
       if (recomputeTimer) clearTimeout(recomputeTimer)
+      if (selectionTimer) clearTimeout(selectionTimer)
+      if (selectionWatcher) selectionWatcher.close()
       saveHistory()
       recompute()
     },

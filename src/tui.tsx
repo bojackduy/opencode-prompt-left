@@ -2,12 +2,13 @@
 import type { JSX } from "@opentui/solid"
 import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { Show, For, createMemo, createSignal, onCleanup } from "solid-js"
-import { readFileSync } from "node:fs"
-import { join } from "node:path"
-import { ESTIMATE_PATH, type EstimateFile } from "./shared"
+import { readFileSync, watch, writeFileSync, renameSync, mkdirSync } from "node:fs"
+import { basename, dirname, join } from "node:path"
+import { ESTIMATE_PATH, SELECTION_PATH, type EstimateFile, type TuiSelection } from "./shared"
 
 const POLL_INTERVAL_MS = 2_500
 const SLOT_ORDER = 95
+const SELECTION_DEBOUNCE_MS = 300
 
 function loadEstimate(): EstimateFile | null {
   try {
@@ -32,6 +33,56 @@ function quotaRendersPrompt(api: Parameters<TuiPlugin>[0]): boolean {
     return compact.sessionPrompt === true
   } catch {
     return false
+  }
+}
+
+function writeSelection(path: string, model: { providerID: string; modelID: string }, last: { value: string }): void {
+  const sel: TuiSelection = { providerID: model.providerID, modelID: model.modelID, at: Date.now() }
+  const serialized = JSON.stringify(sel)
+  if (serialized === last.value) return
+  last.value = serialized
+  try {
+    mkdirSync(dirname(path), { recursive: true })
+    const tmp = `${path}.tmp`
+    writeFileSync(tmp, serialized)
+    renameSync(tmp, path)
+  } catch {}
+}
+
+function readRecentModel(path: string): { providerID: string; modelID: string } | null {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as {
+      recent?: { providerID?: string; modelID?: string }[]
+    }
+    const first = raw.recent?.[0]
+    if (first?.providerID && first?.modelID) return { providerID: first.providerID, modelID: first.modelID }
+  } catch {}
+  return null
+}
+
+function watchModelSelection(api: Parameters<TuiPlugin>[0]): () => void {
+  const modelPath = join(api.state.path.state, "model.json")
+  const last = { value: "" }
+  const push = () => {
+    const model = readRecentModel(modelPath)
+    if (model) writeSelection(SELECTION_PATH, model, last)
+  }
+  push()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let watcher: ReturnType<typeof watch> | undefined
+  try {
+    watcher = watch(api.state.path.state, (_event, filename) => {
+      if (!filename || basename(String(filename)) !== "model.json") return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = undefined
+        push()
+      }, SELECTION_DEBOUNCE_MS)
+    })
+  } catch {}
+  return () => {
+    if (timer) clearTimeout(timer)
+    watcher?.close()
   }
 }
 
@@ -177,6 +228,9 @@ const tui: TuiPlugin = async (api) => {
   poll()
   const timer = setInterval(poll, POLL_INTERVAL_MS)
   api.lifecycle.onDispose(() => clearInterval(timer))
+
+  const stopModelWatch = watchModelSelection(api)
+  api.lifecycle.onDispose(stopModelWatch)
 
   api.slots.register({
     order: SLOT_ORDER,

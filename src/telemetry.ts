@@ -221,6 +221,12 @@ export class Telemetry {
     this.lastSelected = sel
   }
 
+  overrideSelection(sel: SelectedRegime): void {
+    if (!sel.provider) return
+    if (this.latestRoot) this.selected.set(this.latestRoot, sel)
+    this.lastSelected = sel
+  }
+
   activeSelected(): SelectedRegime {
     if (this.latestRoot) {
       const sel = this.selected.get(this.latestRoot)
