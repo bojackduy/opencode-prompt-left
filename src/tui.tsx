@@ -3,13 +3,14 @@ import type { JSX } from "@opentui/solid"
 import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { Show, For, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { readFileSync, watch, writeFileSync, renameSync, mkdirSync } from "node:fs"
-import { basename, dirname, join } from "node:path"
+import { dirname, join } from "node:path"
 import { statePaths, workspaceKey, type ActiveFile, type EstimateFile, type TuiSelection } from "./shared"
 
 const POLL_INTERVAL_MS = 2_500
 const SLOT_ORDER = 95
 const SELECTION_DEBOUNCE_MS = 300
 const ACTIVE_WRITE_MS = 2_500
+const MODEL_POLL_INTERVAL_MS = 5_000
 
 const paths = statePaths(workspaceKey(process.cwd()))
 
@@ -82,18 +83,20 @@ function watchModelSelection(api: Parameters<TuiPlugin>[0]): () => void {
   push()
   let timer: ReturnType<typeof setTimeout> | undefined
   let watcher: ReturnType<typeof watch> | undefined
+  const poll = () => {
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(() => {
+      timer = undefined
+      push()
+    }, SELECTION_DEBOUNCE_MS)
+  }
   try {
-    watcher = watch(api.state.path.state, (_event, filename) => {
-      if (!filename || basename(String(filename)) !== "model.json") return
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => {
-        timer = undefined
-        push()
-      }, SELECTION_DEBOUNCE_MS)
-    })
+    watcher = watch(api.state.path.state, () => poll())
   } catch {}
+  const pollTimer = setInterval(poll, MODEL_POLL_INTERVAL_MS)
   return () => {
     if (timer) clearTimeout(timer)
+    clearInterval(pollTimer)
     watcher?.close()
   }
 }

@@ -1,7 +1,7 @@
 import type { Event } from "@opencode-ai/sdk"
 import type { Plugin } from "@opencode-ai/plugin"
-import { watch, mkdirSync } from "node:fs"
-import { basename, dirname, join } from "node:path"
+import { watch, mkdirSync, statSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { Telemetry } from "./telemetry"
 import { readQuotaSnapshot } from "./quota"
 import { loadBudgets } from "./budget"
@@ -24,6 +24,7 @@ const POLL_INTERVAL_MS = 60_000
 const RECOMPUTE_DEBOUNCE_MS = 1_000
 const EXTERNAL_EWMA_ALPHA = 0.3
 const SELECTION_DEBOUNCE_MS = 300
+const BRIDGE_POLL_INTERVAL_MS = 5_000
 const COMPACTION_BUFFER = 20_000
 const MAX_WINDOW_OBSERVATIONS = 24
 
@@ -60,26 +61,36 @@ const plugin: Plugin = async ({ client }, _options) => {
   let quota = readQuotaSnapshot()
   let lastSnapAt = 0
   let pollTimer: ReturnType<typeof setInterval> | undefined
+  let bridgePollTimer: ReturnType<typeof setInterval> | undefined
   let recomputeTimer: ReturnType<typeof setTimeout> | undefined
-  let selectionWatcher: ReturnType<typeof watch> | undefined
-  let selectionTimer: ReturnType<typeof setTimeout> | undefined
-  let activeWatcher: ReturnType<typeof watch> | undefined
-  let activeTimer: ReturnType<typeof setTimeout> | undefined
+  let dirWatcher: ReturnType<typeof watch> | undefined
+  let bridgeTimer: ReturnType<typeof setTimeout> | undefined
+  let lastSelKey = ""
+  let lastActiveKey = ""
   const pluginCleanup: (() => void)[] = []
 
   function modelKey(providerID: string, modelID: string): string {
     return `${providerID}/${modelID}`
   }
 
-  function applySelection() {
+  function applySelection(): boolean {
     const sel = readJson<TuiSelection>(paths.selection)
-    if (!sel?.providerID) return
-    telemetry.overrideSelection({ provider: sel.providerID, model: sel.modelID })
+    const key = sel ? JSON.stringify(sel) : ""
+    if (key === lastSelKey) return false
+    lastSelKey = key
+    if (sel?.providerID) {
+      telemetry.overrideSelection({ provider: sel.providerID, model: sel.modelID })
+      return true
+    }
+    return false
   }
 
-  function applyActive() {
+  function applyActive(): boolean {
     const active = readJson<ActiveFile>(paths.active)
-    if (!active?.sessionID) return
+    const key = active ? JSON.stringify(active) : ""
+    if (key === lastActiveKey) return false
+    lastActiveKey = key
+    if (!active?.sessionID) return false
     telemetry.setActiveSession(active.sessionID)
     if (active.model?.providerID && active.model?.modelID) {
       telemetry.noteBaseline(active.sessionID, {
@@ -88,35 +99,35 @@ const plugin: Plugin = async ({ client }, _options) => {
         agent: active.agent,
       })
     }
+    return true
+  }
+
+  function refreshBridge() {
+    const changed = applySelection() || applyActive()
+    if (changed) {
+      saveHistory()
+      recompute()
+    }
   }
 
   function watchFiles() {
     mkdirSync(paths.dir, { recursive: true })
-    applySelection()
-    applyActive()
+    refreshBridge()
     try {
-      selectionWatcher = watch(paths.dir, (_event, filename) => {
-        if (!filename || basename(String(filename)) !== "selection.json") return
-        if (selectionTimer) clearTimeout(selectionTimer)
-        selectionTimer = setTimeout(() => {
-          selectionTimer = undefined
-          applySelection()
-          recompute()
-        }, SELECTION_DEBOUNCE_MS)
-      })
-      activeWatcher = watch(paths.dir, (_event, filename) => {
-        if (!filename || basename(String(filename)) !== "active.json") return
-        if (activeTimer) clearTimeout(activeTimer)
-        activeTimer = setTimeout(() => {
-          activeTimer = undefined
-          applyActive()
-          saveHistory()
-          recompute()
+      dirWatcher = watch(paths.dir, () => {
+        if (bridgeTimer) clearTimeout(bridgeTimer)
+        bridgeTimer = setTimeout(() => {
+          bridgeTimer = undefined
+          refreshBridge()
         }, SELECTION_DEBOUNCE_MS)
       })
     } catch (err) {
       log(`state watcher failed: ${String(err)}`)
     }
+    bridgePollTimer = setInterval(refreshBridge, BRIDGE_POLL_INTERVAL_MS)
+    pluginCleanup.push(() => {
+      if (bridgePollTimer) clearInterval(bridgePollTimer)
+    })
   }
 
   function log(msg: string) {
@@ -260,12 +271,21 @@ const plugin: Plugin = async ({ client }, _options) => {
   }
 
   function watchConfig() {
-    try {
-      const configWatcher = watch(dirname(CONFIG_PATH), (_event, filename) => {
-        if (!filename || basename(String(filename)) !== "prompt-left.json") return
+    let lastMtime = 0
+    const reload = () => {
+      try {
+        const stat = statSync(CONFIG_PATH)
+        if (stat.mtimeMs === lastMtime) return
+        lastMtime = stat.mtimeMs
         budgets = loadBudgets()
         recompute()
-      })
+      } catch {
+        lastMtime = 0
+      }
+    }
+    reload()
+    try {
+      const configWatcher = watch(dirname(CONFIG_PATH), () => reload())
       pluginCleanup.push(() => configWatcher.close())
     } catch {}
   }
@@ -293,10 +313,8 @@ const plugin: Plugin = async ({ client }, _options) => {
     async dispose() {
       if (pollTimer) clearInterval(pollTimer)
       if (recomputeTimer) clearTimeout(recomputeTimer)
-      if (selectionTimer) clearTimeout(selectionTimer)
-      if (activeTimer) clearTimeout(activeTimer)
-      if (selectionWatcher) selectionWatcher.close()
-      if (activeWatcher) activeWatcher.close()
+      if (bridgeTimer) clearTimeout(bridgeTimer)
+      if (dirWatcher) dirWatcher.close()
       for (const cleanup of pluginCleanup) {
         try {
           cleanup()

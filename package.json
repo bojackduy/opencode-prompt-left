@@ -1,5 +1,5 @@
 {
-  "name": "opencode-prompt-left",
+  "name": "@bojackduy/opencode-prompt-left",
   "version": "0.1.2",
   "description": "Estimates how many similar prompts remain before provider quota runs out, shown in the OpenCode compact line.",
   "type": "module",

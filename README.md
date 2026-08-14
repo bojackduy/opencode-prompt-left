@@ -63,6 +63,11 @@ model picker → TUI writes ~/.local/state/opencode/model.json (recent[0] = sele
              → prompt-left server plugin watches it → overrideSelection → recompute
 ```
 
+Both sides watch their files with a **poll safety net** (5s) in addition to
+fs.watch — even if a watch event is missed or coalesced, the next poll picks
+the change up and deduplicates, so nothing is lost and unchanged files never
+trigger recomputes.
+
 | You do this | What fires | Result |
 |---|---|---|
 | Pick a model in the picker | `model.json` write → `selection.json` → server watcher → `overrideSelection` | ✅ recompute in <1s, no prompt needed |
