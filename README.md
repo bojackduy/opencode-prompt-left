@@ -15,16 +15,20 @@ predicted cost per prompt  = recency-weighted EWMA of recent root-prompt costs
                              (cost, requests, tokens in/out/reasoning, cache r/w,
                               tool calls, tool output, child sessions)
 
-quota rate per window      = observed Δpercent / local OpenCode cost spent
-                             since that window last changed (per window!)
+plan budget per window     = known dollar limits (OpenCode Go: $12/5h, $30/week,
+                             $60/month — overridable in prompt-left.json)
 
-burn per prompt            = predicted cost × quota rate
-
-prompts left               = simulate prompts forward:
-                             context grows per prompt → compaction resets it to
-                             summary+tail and adds compaction cost → repeat
-                             until any quota window hits zero
+prompts left               = (budget × remaining%) ÷ predicted cost per prompt
 ```
+
+For providers with known plan budgets the estimate is **exact** — it converts
+the reported remaining percentage into remaining dollars and divides by your
+real per-prompt cost. For other providers it falls back to observed
+quota-per-dollar rates (`Δpercent ÷ local cost`), then to a prior.
+
+Per-window resolution order: **plan budget → quota-rate observations → prior**.
+The binding window is the one with the fewest prompts left (e.g. Weekly usually
+binds over 5h).
 
 - A **root prompt** is one top-level user message, including everything it spawned: tool loops, retries, child/subagent sessions, and compaction.
 - Workload comes from OpenCode's exact `step-finish` usage records (per-request tokens and cost), deduplicated — not cumulative message snapshots.
@@ -36,9 +40,9 @@ prompts left               = simulate prompts forward:
 
 | Compact line | Meaning |
 |---|---|
-| `opencode-go/deepseek-v4-flash ≈14 prompts · Weekly` | calibrated forecast, green/yellow/red by remaining capacity |
-| `opencode-go/deepseek-v4-flash ≈2 prompts · Weekly` (low confidence) | prior estimate (1.5–2.5pp/prompt) — no quota-rate observations yet for this directory; replaced automatically once a quota % change is observed |
-| `≈4 prompts · Monthly` (muted) | cold-start prior — no usage history at all yet |
+| `opencode-go/deepseek-v4-flash ≈54 prompts · Weekly` | plan-budget estimate (real per-prompt cost ÷ remaining dollars), green/yellow/red by capacity |
+| `opencode-go/deepseek-v4-flash $1.20 left · Weekly` | budget known but no usage history yet — exact dollars, count appears after a few prompts |
+| `≈2 prompts · Weekly` (low confidence) | prior estimate — no budget config and no observations |
 | `no quota` | no usable quota export found |
 
 `/prompts-left` opens the full breakdown: best/safe counts, binding window + reset countdown, per-provider windows, forecast per prompt (cost, requests, tools, cache), context/compaction horizon, and calibration stats.
@@ -132,6 +136,20 @@ Restart OpenCode. State persists per project directory at `$XDG_CACHE_HOME/openc
 
 - `history.json` — root-prompt usage telemetry and per-window quota-rate observations (survives restarts)
 - `estimate.json` — the current estimate, consumed by the TUI
+
+## Plan budgets
+
+`~/.config/opencode/prompt-left.json` overrides plan budgets (defaults apply without the file):
+
+```jsonc
+{
+  "budgets": {
+    "opencode-go": { "5h": 12, "Weekly": 30, "Monthly": 60 }
+  }
+}
+```
+
+Defaults (from the OpenCode Go plan docs): `opencode-go` → $12 / 5h, $30 / week, $60 / month. Add entries for other providers to give them the same exact-dollar treatment. The file is watched — edits apply on the next recompute.
 
 ## Development
 

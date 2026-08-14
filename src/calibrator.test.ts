@@ -217,6 +217,76 @@ describe("computeEstimate", () => {
     expect(est.compact).toBe(`opencode-go/m ≈${Math.floor(7 / 2.5)} prompts · Weekly`)
   })
 
+  test("budget-based estimate converts remaining percent via plan dollars", () => {
+    const prompts = [
+      prompt({ finishedAt: 1, provider: "opencode-go", model: "m", agent: "build", byProvider: { "opencode-go": usage({ cost: 0.05 }) } }),
+      prompt({ finishedAt: 2, provider: "opencode-go", model: "m", agent: "build", byProvider: { "opencode-go": usage({ cost: 0.05 }) } }),
+    ]
+    const est = computeEstimate({
+      now: 1_000_010,
+      quota,
+      prompts,
+      windows: {},
+      selected: { provider: "opencode-go", model: "m", agent: "build" },
+      contextNow: null,
+      usableContext: null,
+      externalShare: 0,
+      windowBudgets: { "5h": 12, Weekly: 30, Monthly: 60 },
+    })
+    expect(est.status).toBe("ready")
+    expect(est.binding?.method).toBe("budget")
+    expect(est.binding?.window).toBe("Weekly")
+    expect(est.binding?.budget).toBe(30)
+    expect(est.binding?.remainingUSD).toBeCloseTo(2.1)
+    expect(est.likely).toBe(Math.floor(2.1 / 0.05))
+    expect(est.compact).toBe(`opencode-go/m ≈${Math.floor(2.1 / 0.05)} prompts · Weekly`)
+    const weekly = est.perProvider.find((p) => p.provider === "opencode-go")!.windows.find((w) => w.window === "Weekly")!
+    expect(weekly.prompts).toBe(Math.floor(2.1 / 0.05))
+  })
+
+  test("binding picks the window with the least dollars-left prompts", () => {
+    const prompts = [
+      prompt({ finishedAt: 1, provider: "opencode-go", model: "m", agent: "build", byProvider: { "opencode-go": usage({ cost: 0.05 }) } }),
+    ]
+    const est = computeEstimate({
+      now: 1_000_010,
+      quota: { at: 1_000_000, fromExport: true, entries: [
+        { provider: "opencode-go", name: "5h", window: "5h", percentRemaining: 65 },
+        { provider: "opencode-go", name: "Weekly", window: "Weekly", percentRemaining: 7 },
+        { provider: "opencode-go", name: "Monthly", window: "Monthly", percentRemaining: 40 },
+      ] },
+      prompts,
+      windows: {},
+      selected: { provider: "opencode-go", model: "m", agent: "build" },
+      contextNow: null,
+      usableContext: null,
+      externalShare: 0,
+      windowBudgets: { "5h": 12, Weekly: 30, Monthly: 60 },
+    })
+    // 5h: 12*0.65/0.05=156 · Weekly: 30*0.07/0.05=42 · Monthly: 60*0.40/0.05=480
+    expect(est.binding?.window).toBe("Weekly")
+    expect(est.likely).toBe(42)
+  })
+
+  test("cold start with a budget shows remaining dollars instead of a fake count", () => {
+    const est = computeEstimate({
+      now: 1_000_010,
+      quota,
+      prompts: [],
+      windows: {},
+      selected: { provider: "opencode-go", model: "m", agent: "build" },
+      contextNow: null,
+      usableContext: null,
+      externalShare: 0,
+      windowBudgets: { "5h": 12, Weekly: 30, Monthly: 60 },
+    })
+    expect(est.status).toBe("ready")
+    expect(est.calibration.usingPrior).toBe(false)
+    expect(est.likely).toBeNull()
+    expect(est.binding?.method).toBe("budget")
+    expect(est.compact).toBe("opencode-go/m $2.10 left · Weekly")
+  })
+
   test("cold start uses a prior burn when no prompts exist", () => {
     const est = computeEstimate({
       now: 1_000_010,

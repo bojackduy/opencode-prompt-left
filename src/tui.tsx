@@ -194,6 +194,11 @@ function DetailView(props: { api: Parameters<TuiPlugin>[0]; estimate: () => Esti
       out.push({ text: `binding: ${e.binding.provider} · ${e.binding.window}`, fg: theme.text })
       const burn = e.binding.burnPP !== null ? ` · burn ${e.binding.burnPP.toFixed(2)}pp/prompt` : ""
       out.push({ text: `  remaining ${fmtPercent(e.binding.remaining)}${burn}`, fg: theme.textMuted })
+      if (e.binding.method === "budget" && e.binding.budget) {
+        const cost = e.forecast?.cost ?? 0
+        const costLine = cost > 0 ? ` · $${cost.toFixed(4)}/prompt` : ""
+        out.push({ text: `  plan budget $${e.binding.budget} · $${(e.binding.remainingUSD ?? 0).toFixed(2)} left${costLine}`, fg: theme.textMuted })
+      }
       if (e.binding.resetAt) out.push({ text: `  resets in ${fmtCountdown(e.binding.resetAt)}`, fg: theme.textMuted })
     }
     out.push({ text: "", fg: theme.text })

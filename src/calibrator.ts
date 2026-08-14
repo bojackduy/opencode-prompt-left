@@ -187,6 +187,7 @@ export function windowEstimates(input: {
   forecast: PromptForecast | null
   contextNow: number | null
   usable: number | null
+  budgets?: Record<string, number>
 }): WindowEstimate[] {
   return input.quota.entries
     .filter((e) => e.provider === input.provider)
@@ -194,15 +195,19 @@ export function windowEstimates(input: {
       const tracker = input.windows[`${e.provider}::${e.name}`]
       const stats = tracker ? rateStats(tracker.observations) : null
       const remaining = e.percentRemaining ?? 0
-      const prompts = input.forecast && stats
-        ? simulatePrompts({
-            forecast: input.forecast,
-            rate: stats.median,
-            remaining,
-            contextNow: input.contextNow,
-            usable: input.usable,
-          })
-        : null
+      const budget = input.budgets?.[e.window ?? e.name]
+      const prompts =
+        budget && input.forecast
+          ? budgetPrompts(remaining, budget, input.forecast.cost)
+          : input.forecast && stats
+            ? simulatePrompts({
+                forecast: input.forecast,
+                rate: stats.median,
+                remaining,
+                contextNow: input.contextNow,
+                usable: input.usable,
+              })
+            : null
       return {
         window: e.window ?? e.name,
         remaining,
@@ -243,11 +248,65 @@ export interface EstimateInput {
   contextNow: number | null
   usableContext: number | null
   externalShare: number
+  windowBudgets?: Record<string, number>
 }
 
 function compactPrefix(selected: SelectedRegime): string {
   if (selected.provider && selected.model) return `${selected.provider}/${selected.model} `
   return ""
+}
+
+function safeCost(cost: number, cv: number, n: number): number {
+  if (n < 3) return cost * 1.5
+  return cost + Math.max(1.28 * cost * cv, 0.05 * cost)
+}
+
+function budgetPrompts(remainingPct: number, budget: number, cost: number): number | null {
+  if (!budget || budget <= 0 || !cost || cost <= 0) return null
+  return Math.floor(((budget * remainingPct) / 100) / cost)
+}
+
+function worstBudgetEntry(
+  selectedProviderEntries: QuotaSnapshot["entries"],
+  windowBudgets?: Record<string, number>,
+): { entry: QuotaSnapshot["entries"][number]; budget: number } | null {
+  let best: { entry: QuotaSnapshot["entries"][number]; budget: number; usd: number } | null = null
+  for (const e of selectedProviderEntries) {
+    const budget = windowBudgets?.[e.window ?? e.name]
+    if (!budget || budget <= 0) continue
+    const usd = (budget * (e.percentRemaining ?? 0)) / 100
+    if (!best || usd < best.usd) {
+      best = { entry: e, budget, usd }
+    }
+  }
+  return best ? { entry: best.entry, budget: best.budget } : null
+}
+
+function budgetOnlyEstimate(
+  base: EstimateFile,
+  entry: QuotaSnapshot["entries"][number],
+  budget: number,
+): EstimateFile {
+  const remaining = entry.percentRemaining ?? 0
+  const remainingUSD = (budget * remaining) / 100
+  base.status = "ready"
+  base.compact = `${compactPrefix(base.selected)}$${remainingUSD.toFixed(2)} left · ${entry.window ?? entry.name}`
+  base.likely = null
+  base.safe = null
+  base.binding = {
+    provider: entry.provider,
+    window: entry.window ?? entry.name,
+    remaining,
+    burnPP: null,
+    resetAt: entry.resetAt,
+    method: "budget",
+    budget,
+    remainingUSD,
+  }
+  base.confidence = 0.3 * Math.max(0, 1 - base.calibration.quotaAgeSec / 1800)
+  base.confidenceLabel = confidenceLabel(base.confidence)
+  base.calibration.fallbackLevel = 3
+  return base
 }
 
 function priorEstimate(base: EstimateFile, selectedProviderEntries: QuotaSnapshot["entries"], quotaAgeSec: number): EstimateFile {
@@ -264,6 +323,7 @@ function priorEstimate(base: EstimateFile, selectedProviderEntries: QuotaSnapsho
         remaining,
         burnPP: null,
         resetAt: e.resetAt,
+        method: "prior",
       }
     }
   }
@@ -336,6 +396,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
         forecast: f,
         contextNow: input.contextNow,
         usable: input.usableContext,
+        budgets: provider === selected.provider ? input.windowBudgets : undefined,
       }),
     }
   })
@@ -347,6 +408,8 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   }
 
   if (!forecast) {
+    const worst = worstBudgetEntry(selectedProviderEntries, input.windowBudgets)
+    if (worst) return budgetOnlyEstimate(base, worst.entry, worst.budget)
     return priorEstimate(base, selectedProviderEntries, quotaAgeSec)
   }
 
@@ -355,50 +418,72 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   let binding: EstimateFile["binding"] = null
   let bindingPrompts = Number.POSITIVE_INFINITY
   let bindingSafe: number | null = null
-  let totalObs = 0
+  let bindingMethod: "budget" | "rate" = "rate"
   let bindingCv = 0
+  let rateObsCount = 0
   for (const e of selectedProviderEntries) {
-    const tracker = input.windows[`${e.provider}::${e.name}`]
-    const stats = tracker ? rateStats(tracker.observations) : null
-    if (stats) totalObs += stats.count
-    const best = stats
-      ? simulatePrompts({
-          forecast,
-          rate: stats.median,
-          remaining: e.percentRemaining ?? 0,
-          contextNow: input.contextNow,
-          usable: input.usableContext,
-        })
-      : null
-    const safe = stats
-      ? simulatePrompts({
-          forecast,
-          rate: stats.safe,
-          remaining: e.percentRemaining ?? 0,
-          contextNow: input.contextNow,
-          usable: input.usableContext,
-        })
-      : null
+    const remaining = e.percentRemaining ?? 0
+    const budget = input.windowBudgets?.[e.window ?? e.name]
+    let best: number | null = null
+    let safe: number | null = null
+    let burnPP: number | null = null
+    let method: "budget" | "rate" = "rate"
+    let stats: RateStats | null = null
+    if (budget && forecast.cost > 0) {
+      best = budgetPrompts(remaining, budget, forecast.cost)
+      safe = budgetPrompts(remaining, budget, safeCost(forecast.cost, forecast.costCv, forecast.sampleCount))
+      burnPP = (forecast.cost / budget) * 100
+      method = "budget"
+    } else {
+      const tracker = input.windows[`${e.provider}::${e.name}`]
+      stats = tracker ? rateStats(tracker.observations) : null
+      if (stats) rateObsCount += stats.count
+      best = stats
+        ? simulatePrompts({
+            forecast,
+            rate: stats.median,
+            remaining,
+            contextNow: input.contextNow,
+            usable: input.usableContext,
+          })
+        : null
+      safe = stats
+        ? simulatePrompts({
+            forecast,
+            rate: stats.safe,
+            remaining,
+            contextNow: input.contextNow,
+            usable: input.usableContext,
+          })
+        : null
+      burnPP = stats && forecast.cost > 0 ? forecast.cost * stats.median : null
+    }
     if (best !== null && best < bindingPrompts) {
       bindingPrompts = best
       bindingSafe = safe
-      bindingCv = stats?.cv ?? 0
+      bindingMethod = method
+      bindingCv = method === "budget" ? forecast.costCv : (stats?.cv ?? 0)
       binding = {
         provider: e.provider,
         window: e.window ?? e.name,
-        remaining: e.percentRemaining ?? 0,
-        burnPP: stats && forecast.cost > 0 ? forecast.cost * stats.median : null,
+        remaining,
+        burnPP,
         resetAt: e.resetAt,
+        method,
+        budget: method === "budget" ? budget : undefined,
+        remainingUSD: method === "budget" && budget ? (budget * remaining) / 100 : undefined,
       }
     }
   }
 
   if (binding === null) {
+    const worst = worstBudgetEntry(selectedProviderEntries, input.windowBudgets)
+    if (worst) return budgetOnlyEstimate(base, worst.entry, worst.budget)
     return priorEstimate(base, selectedProviderEntries, quotaAgeSec)
   }
 
   const confidence = confidenceScore({
-    n: Math.min(totalObs, 10),
+    n: Math.min(bindingMethod === "budget" ? forecast.sampleCount : rateObsCount, 10),
     fallbackLevel,
     quotaAgeSec,
     externalShare: input.externalShare,
@@ -412,6 +497,6 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   base.confidenceLabel = confidenceLabel(confidence)
   base.binding = binding
   base.calibration.fallbackLevel = fallbackLevel
-  base.calibration.rateObs = totalObs
+  base.calibration.rateObs = rateObsCount
   return base
 }

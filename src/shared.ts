@@ -4,6 +4,11 @@ import { dirname, join } from "node:path"
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 
 export const CACHE_BASE = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "opencode")
+export const CONFIG_PATH = join(
+  process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
+  "opencode",
+  "prompt-left.json",
+)
 
 export const STATE_DIR = join(CACHE_BASE, "prompt-left")
 export const QUOTA_EXPORT_PATH = join(CACHE_BASE, "quota-export.json")
@@ -183,6 +188,9 @@ export interface EstimateFile {
     remaining: number
     burnPP: number | null
     resetAt?: number
+    method?: "budget" | "rate" | "prior"
+    budget?: number
+    remainingUSD?: number
   } | null
   perProvider: PerProviderEstimate[]
   forecast: PromptForecast | null

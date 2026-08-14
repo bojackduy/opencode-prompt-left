@@ -1,11 +1,13 @@
 import type { Event } from "@opencode-ai/sdk"
 import type { Plugin } from "@opencode-ai/plugin"
 import { watch, mkdirSync } from "node:fs"
-import { basename, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import { Telemetry } from "./telemetry"
 import { readQuotaSnapshot } from "./quota"
+import { loadBudgets } from "./budget"
 import { computeEstimate, type EstimateInput } from "./calibrator"
 import {
+  CONFIG_PATH,
   freshHistory,
   readJson,
   statePaths,
@@ -52,6 +54,7 @@ const plugin: Plugin = async ({ client }, _options) => {
   if (history.activeSession) telemetry.setActiveSession(history.activeSession)
 
   const modelCatalog = new Map<string, ModelInfo>()
+  let budgets = loadBudgets()
   let quota = readQuotaSnapshot()
   let lastSnapAt = 0
   let pollTimer: ReturnType<typeof setInterval> | undefined
@@ -60,6 +63,7 @@ const plugin: Plugin = async ({ client }, _options) => {
   let selectionTimer: ReturnType<typeof setTimeout> | undefined
   let activeWatcher: ReturnType<typeof watch> | undefined
   let activeTimer: ReturnType<typeof setTimeout> | undefined
+  const pluginCleanup: (() => void)[] = []
 
   function modelKey(providerID: string, modelID: string): string {
     return `${providerID}/${modelID}`
@@ -240,13 +244,26 @@ const plugin: Plugin = async ({ client }, _options) => {
       contextNow: telemetry.contextNow(),
       usableContext: usableContext(selected.provider, selected.model),
       externalShare: history.externalShare,
+      windowBudgets: selected.provider ? budgets[selected.provider] : undefined,
     }
     const estimate: EstimateFile = computeEstimate(input)
     writeJsonAtomic(paths.estimate, estimate)
   }
 
+  function watchConfig() {
+    try {
+      const configWatcher = watch(dirname(CONFIG_PATH), (_event, filename) => {
+        if (!filename || basename(String(filename)) !== "prompt-left.json") return
+        budgets = loadBudgets()
+        recompute()
+      })
+      pluginCleanup.push(() => configWatcher.close())
+    } catch {}
+  }
+
   pollTimer = setInterval(refreshQuota, POLL_INTERVAL_MS)
   watchFiles()
+  watchConfig()
   void init()
 
   return {
@@ -271,6 +288,11 @@ const plugin: Plugin = async ({ client }, _options) => {
       if (activeTimer) clearTimeout(activeTimer)
       if (selectionWatcher) selectionWatcher.close()
       if (activeWatcher) activeWatcher.close()
+      for (const cleanup of pluginCleanup) {
+        try {
+          cleanup()
+        } catch {}
+      }
       telemetry.finalizeAll()
       saveHistory()
       recompute()
