@@ -6,6 +6,8 @@ Estimates how many **similar prompts** remain before your provider quota runs ou
 ≈14 prompts · Weekly            ← compact line (best estimate)
 ```
 
+![prompt-left demo](assets/demo.png)
+
 The number is a forward forecast of your own usage: recent per-prompt workload (cost, requests, tokens in/out, cache read/write, tool calls, subagents), projected against the current context/compaction state, then converted to quota burn using the observed percentage-per-dollar rate of each quota window.
 
 ## Core formula
@@ -47,37 +49,53 @@ binds over 5h).
 
 `/prompts-left` opens the full breakdown: best/safe counts, binding window + reset countdown, per-provider windows, forecast per prompt (cost, requests, tools, cache), context/compaction horizon, and calibration stats.
 
-## Model-switch hot update
+## When does it recalculate?
 
-opencode never publishes a "model changed" event — the selection lives in the TUI's in-memory store and reaches the server only at prompt-submit. prompt-left works around that with a file bridge:
+### Model selection
+
+opencode never publishes a "model changed" event — the selection lives in the
+TUI's in-memory store and reaches the server only at prompt-submit. prompt-left
+works around that with a file bridge plus per-message signals:
 
 ```
-model picker → TUI writes ~/.local/share/opencode/model.json (recent[0] = selection)
-             → prompt-left TUI plugin watches it → writes …/opencode/prompt-left/selection.json
-             → prompt-left server plugin watches it → recomputes immediately
+model picker → TUI writes ~/.local/state/opencode/model.json (recent[0] = selection)
+             → prompt-left TUI plugin watches it (300ms) → writes selection.json
+             → prompt-left server plugin watches it → overrideSelection → recompute
 ```
 
-| Switch method | Hot update |
+| You do this | What fires | Result |
+|---|---|---|
+| Pick a model in the picker | `model.json` write → `selection.json` → server watcher → `overrideSelection` | ✅ recompute in <1s, no prompt needed |
+| Favorite cycle (`model.cycle_favorite`) | same path (`cycleFavorite` also saves `recent`) | ✅ recompute in <1s |
+| Tab cycle (`model.cycle_recent`) | nothing is written anywhere by opencode | ⚠️ no immediate recompute; updates at the next prompt submit |
+| Submit a prompt | `chat.message` hook (`noteSelection` + `beginPrompt`) | ✅ recompute (~1s debounce) |
+| A real user message arrives (no active prompt, e.g. after restart mid-session) | `message.updated` event | ✅ recompute |
+| `session.next.model.switched` event | opencode emits it (only if something calls the switch API) | ✅ recompute |
+| Open a different session / restart / resume from another directory | TUI writes `active.json` (on mount + every 2.5s) with the session's **last-used model**; server applies it as the baseline | ✅ recompute ≤2.5s |
+
+The **tab-cycle blind spot** exists because opencode persists nothing for it;
+it self-corrects at submit.
+
+### Any other trigger
+
+Every recompute (1s debounce) updates `estimate.json`, which the TUI polls
+every 2.5s:
+
+| Trigger | Source |
 |---|---|
-| Model picker (enter, or any `set(…, { recent: true })`) | ✅ instant, no prompt needed |
-| Favorite model cycle (`model.cycle_favorite`) | ✅ instant (it also saves `recent`) |
-| Tab cycle (`model.cycle_recent`) | ⚠️ at prompt-submit — the TUI writes nothing for this one, so there is nothing to observe |
-| Prompt submit | ✅ always (server `chat.message` hook) |
+| `session.created` / `session.deleted` / `session.idle` / `session.compacted` | server event hook |
+| `message.updated` / `message.part.updated` / `message.removed` | server event hook (usage + tool + context accounting) |
+| `session.next.agent.switched` | server event hook |
+| Quota snapshot advances (every 60s poll, or on demand) | `readQuotaSnapshot()` → per-window rate observations |
+| `selection.json` / `active.json` change | server fs.watch on the workspace state dir |
+| `prompt-left.json` config edit (budgets) | server fs.watch on the config dir |
+| Plugin dispose | finalize + recompute |
 
-## Model and provider tracking
+### Selection resolution (per session)
 
-The estimate follows the **session you're currently viewing**, not a global "current model":
-
-| Signal | How it works |
-|---|---|
-| Active session + model | The TUI plugin writes `active.json` with the session it renders **plus that session's last-used model** (read in-process from `api.state.session.messages`); the server applies it as the baseline for sessions it hasn't seen yet — restart, session switch, and cross-directory resume all converge within ~2.5s |
-| Prompt submit | `chat.message` + user-message events record the real per-prompt model/provider/agent per session |
-| Model picker bridge | `model.json` `recent[0]` → `selection.json` → wins while it's the freshest signal (covers picking a model before the next prompt) |
-| `session.next.model.switched` | handled if opencode ever emits it (future-proof; the local TUI doesn't call the switch API today) |
-| Model catalog | `client.provider.list()` — real names + context limits + pricing for every model (including auto-detected providers like `opencode-go`) |
-| Persisted | last active session + selection survive restarts |
-
-Selection priority: **real events → picker bridge (by recency) → active.json baseline (only when the session's selection is unknown)**. The one unobservable case is tab-cycling before the next prompt — opencode persists nothing for it, so it self-corrects at submit.
+`real events → picker bridge (by recency) → active.json baseline (only when the
+session's selection is unknown)`. The estimate follows the **session you're
+currently viewing**, not a global "current model":
 
 ## Multi-directory isolation
 
