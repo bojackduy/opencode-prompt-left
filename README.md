@@ -26,10 +26,19 @@ prompts left ≈ floor( percentRemaining / P90(burn per similar root prompt) )
 | Compact line | Meaning |
 |---|---|
 | `≈6 prompts · Weekly` | calibrated estimate, green/yellow/red by remaining capacity |
-| `86% · calibrating` | quota known, burn rate not yet measured (cold start) |
+| `≈4 prompts · Monthly` (muted) | cold-start prior (1.5–2.5pp/prompt) — no burn samples yet, low confidence |
 | `no quota` | no usable quota export found |
 
 `/prompts-left` opens a full breakdown: likely/safe counts, binding window + reset countdown, per-provider windows, context/compaction estimate, and calibration stats.
+
+## Coexisting with opencode-quota
+
+prompt-left renders its line below the prompt bar, exactly like opencode-quota's compact status line. Both can stay enabled:
+
+- If opencode-quota's `tuiCompactStatus.sessionPrompt` is `true`, quota owns the prompt bar and prompt-left appends its own line right below quota's.
+- If quota's session prompt is disabled, prompt-left renders the prompt bar itself and keeps its line.
+
+No configuration is required either way.
 
 ## Requirements
 

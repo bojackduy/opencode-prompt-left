@@ -3,10 +3,11 @@ import type { JSX } from "@opentui/solid"
 import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { Show, For, createMemo, createSignal, onCleanup } from "solid-js"
 import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { ESTIMATE_PATH, type EstimateFile } from "./shared"
 
 const POLL_INTERVAL_MS = 2_500
-const SLOT_ORDER = 100
+const SLOT_ORDER = 95
 
 function loadEstimate(): EstimateFile | null {
   try {
@@ -16,24 +17,72 @@ function loadEstimate(): EstimateFile | null {
   }
 }
 
+function quotaRendersPrompt(api: Parameters<TuiPlugin>[0]): boolean {
+  const quota = api.plugins
+    .list()
+    .find((p) => p.id.startsWith("@slkiser/opencode-quota") || p.id === "opencode-quota")
+  if (!quota?.active) return false
+  try {
+    const sidecar = JSON.parse(
+      readFileSync(join(api.state.path.config, "opencode-quota", "quota-toast.json"), "utf8"),
+    ) as { tuiCompactStatus?: { enabled?: boolean; sessionPrompt?: boolean } }
+    const compact = sidecar.tuiCompactStatus
+    if (!compact) return false
+    if (compact.enabled === false) return false
+    return compact.sessionPrompt === true
+  } catch {
+    return false
+  }
+}
+
 function compactFg(e: EstimateFile, api: Parameters<TuiPlugin>[0]) {
   const t = api.theme.current
   if (e.status !== "ready") return t.textMuted
   const safe = e.safe ?? 0
+  if (e.calibration.usingPrior) return t.textMuted
   if (safe >= 5) return t.success
   if (safe >= 2) return t.warning
   return t.error
 }
 
-function CompactStatus(props: { api: Parameters<TuiPlugin>[0]; estimate: EstimateFile | null }) {
-  const fg = () => (props.estimate ? compactFg(props.estimate, props.api) : props.api.theme.current.textMuted)
+function StatusLine(props: { api: Parameters<TuiPlugin>[0]; estimate: EstimateFile | null }) {
+  const theme = props.api.theme.current
   const text = () => props.estimate?.compact ?? ""
+  const fg = () => (props.estimate ? compactFg(props.estimate, props.api) : theme.textMuted)
   return (
     <Show when={text().length > 0}>
-      <text fg={fg()} wrapMode="none">
-        {` ${text()}`}
-      </text>
+      <box flexDirection="row" justifyContent="flex-end">
+        <text fg={fg()} wrapMode="none">
+          {text()}
+        </text>
+      </box>
     </Show>
+  )
+}
+
+function PromptArea(props: {
+  api: Parameters<TuiPlugin>[0]
+  estimate: EstimateFile | null
+  sessionID: string
+  visible?: boolean
+  disabled?: boolean
+  on_submit?: () => void
+  ref?: (ref: unknown) => void
+}) {
+  const quotaActive = createMemo(() => quotaRendersPrompt(props.api))
+  return (
+    <box gap={0}>
+      <Show when={!quotaActive()}>
+        <props.api.ui.Prompt
+          sessionID={props.sessionID}
+          visible={props.visible}
+          disabled={props.disabled}
+          onSubmit={props.on_submit}
+          ref={props.ref}
+        />
+      </Show>
+      <StatusLine api={props.api} estimate={props.estimate} />
+    </box>
   )
 }
 
@@ -93,6 +142,7 @@ function DetailView(props: { api: Parameters<TuiPlugin>[0]; estimate: () => Esti
     }
     out.push({ text: "", fg: theme.text })
     out.push({ text: `calibration: ${e.calibration.regimeTurns} regime samples · ${e.calibration.rootTurns} root turns · quota age ${Math.round(e.calibration.quotaAgeSec)}s`, fg: theme.textMuted })
+    if (e.calibration.usingPrior) out.push({ text: "cold-start prior estimate (1.5–2.5pp/prompt) — calibrates with use", fg: theme.warning })
     if (e.calibration.fallbackLevel > 0) out.push({ text: `using fallback burn model (level ${e.calibration.fallbackLevel})`, fg: theme.warning })
     if (e.calibration.externalShare > 0.15) out.push({ text: "external quota burn detected — confidence reduced", fg: theme.warning })
     return out
@@ -127,8 +177,18 @@ const tui: TuiPlugin = async (api) => {
   api.slots.register({
     order: SLOT_ORDER,
     slots: {
-      session_prompt_right(_ctx, _props: { session_id: string }) {
-        return <CompactStatus api={api} estimate={estimate()} />
+      session_prompt(_ctx, props: { session_id: string; visible?: boolean; disabled?: boolean; on_submit?: () => void; ref?: (ref: unknown) => void }) {
+        return (
+          <PromptArea
+            api={api}
+            estimate={estimate()}
+            sessionID={props.session_id}
+            visible={props.visible}
+            disabled={props.disabled}
+            on_submit={props.on_submit}
+            ref={props.ref}
+          />
+        )
       },
     },
   })

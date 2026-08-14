@@ -114,6 +114,7 @@ export interface EstimateFile {
     quotaAgeSec: number
     externalShare: number
     fallbackLevel: number
+    usingPrior: boolean
   }
 }
 

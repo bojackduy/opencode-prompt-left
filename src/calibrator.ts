@@ -15,6 +15,9 @@ const EMA_ALPHA = 0.35
 const P90_Z = 1.28
 const MAX_SAMPLES = 30
 
+export const PRIOR_BURN_MEAN = 1.5
+export const PRIOR_BURN_SAFE = 2.5
+
 export function regimeKey(provider: string, model: string, agent: string): string {
   return `${provider}|${model}|${agent}`
 }
@@ -146,6 +149,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
       quotaAgeSec: quota ? Math.max(0, (now - quota.at) / 1000) : 0,
       externalShare: input.externalShare,
       fallbackLevel: 3,
+      usingPrior: false,
     },
   }
 
@@ -168,8 +172,8 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
         const samples = own && own.length > 0 ? own : fallbackAll
         const mean = sampleMean(samples)
         const std = sampleStd(samples, mean)
-        const burn = safeBurnPerPrompt(mean, std, samples.length)
-        const prompts = samples.length > 0 ? Math.floor(promptsForRemaining(e.percentRemaining ?? 0, burn)) : null
+        const burn = samples.length > 0 ? safeBurnPerPrompt(mean, std, samples.length) : PRIOR_BURN_SAFE
+        const prompts = Math.floor(promptsForRemaining(e.percentRemaining ?? 0, burn))
         return {
           window: e.window ?? e.name,
           remaining: e.percentRemaining ?? 0,
@@ -180,18 +184,38 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   }))
 
   if (selectedProviderEntries.length === 0) {
-    const minRemaining = Math.min(...quota.entries.map((e) => e.percentRemaining ?? 100))
     base.status = "calibrating"
-    base.compact = `${Math.floor(minRemaining)}% · no ${selected.provider ?? "provider"} quota`
+    base.compact = "calibrating…"
     return base
   }
 
   if (globalList.length === 0) {
-    const minRemaining = Math.min(...selectedProviderEntries.map((e) => e.percentRemaining ?? 100))
-    base.status = "calibrating"
-    base.compact = `${Math.floor(minRemaining)}% · calibrating`
-    base.confidence = Math.max(0, 1 - quotaAgeSec / 1800)
+    let binding: EstimateFile["binding"] = null
+    let bindingPrompts = Number.POSITIVE_INFINITY
+    for (const e of selectedProviderEntries) {
+      const remaining = e.percentRemaining ?? 0
+      const prompts = promptsForRemaining(remaining, PRIOR_BURN_SAFE)
+      if (prompts < bindingPrompts) {
+        bindingPrompts = prompts
+        binding = {
+          provider: e.provider,
+          window: e.window ?? e.name,
+          remaining,
+          burnMean: PRIOR_BURN_MEAN,
+          burnSafe: PRIOR_BURN_SAFE,
+          resetAt: e.resetAt,
+        }
+      }
+    }
+    base.status = "ready"
+    base.compact = binding ? `≈${Math.floor(bindingPrompts)} prompts · ${binding.window}` : "quota unknown"
+    base.likely = binding ? Math.floor(binding.remaining / PRIOR_BURN_MEAN) : null
+    base.safe = binding ? Math.floor(bindingPrompts) : null
+    base.binding = binding
+    base.confidence = 0.3 * Math.max(0, 1 - quotaAgeSec / 1800)
     base.confidenceLabel = confidenceLabel(base.confidence)
+    base.calibration.usingPrior = true
+    base.calibration.fallbackLevel = 3
     return base
   }
 

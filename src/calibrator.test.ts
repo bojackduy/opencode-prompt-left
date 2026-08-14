@@ -198,7 +198,7 @@ describe("computeEstimate", () => {
     expect(est.safe).toBe(Math.floor(37 / (4.2 + 0.05 * 4.2)))
   })
 
-  test("calibrating without any samples", () => {
+  test("cold start uses a prior burn to show a number immediately", () => {
     const est = computeEstimate({
       now: 1_000_010,
       quota,
@@ -208,9 +208,27 @@ describe("computeEstimate", () => {
       rootTurns: 0,
       context: ctx,
     })
+    expect(est.status).toBe("ready")
+    expect(est.calibration.usingPrior).toBe(true)
+    expect(est.binding?.window).toBe("5h")
+    expect(est.safe).toBe(Math.floor(37 / 2.5))
+    expect(est.likely).toBe(Math.floor(37 / 1.5))
+    expect(est.compact).toBe(`≈${Math.floor(37 / 2.5)} prompts · 5h`)
+    expect(est.confidenceLabel).toBe("low")
+  })
+
+  test("calibrating without a selected provider does not panic across providers", () => {
+    const est = computeEstimate({
+      now: 1_000_010,
+      quota,
+      regimeSamples: {},
+      selected: {},
+      externalShare: 0,
+      rootTurns: 0,
+      context: ctx,
+    })
     expect(est.status).toBe("calibrating")
-    expect(est.safe).toBeNull()
-    expect(est.compact).toContain("calibrating")
+    expect(est.compact).toBe("calibrating…")
   })
 
   test("no-quota without snapshot", () => {
