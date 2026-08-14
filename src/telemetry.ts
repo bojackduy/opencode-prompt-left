@@ -35,6 +35,24 @@ export class Telemetry {
   }
 
   handle(e: Event): void {
+    const type = (e as { type: string }).type
+    if (type === "session.next.model.switched" || type === "session.next.agent.switched") {
+      const props = (e as unknown as {
+        properties: { sessionID: string; model?: { providerID?: string; id?: string; modelID?: string }; agent?: string }
+      }).properties
+      if (type === "session.next.model.switched") {
+        const model = props.model
+        if (model?.providerID && (model.id ?? model.modelID)) {
+          this.noteSelection(props.sessionID, {
+            provider: model.providerID,
+            model: model.id ?? model.modelID,
+          })
+        }
+      } else {
+        if (props.agent) this.noteAgent(props.sessionID, props.agent)
+      }
+      return
+    }
     switch (e.type) {
       case "session.created": {
         const s = e.properties.info
@@ -299,7 +317,10 @@ export class Telemetry {
   }
 
   setActiveSession(sessionID: string): void {
-    if (!this.rootSessions.has(sessionID) && !this.sessionRoot.has(sessionID)) return
+    if (!this.rootSessions.has(sessionID) && !this.sessionRoot.has(sessionID)) {
+      this.rootSessions.add(sessionID)
+      this.sessionRoot.set(sessionID, sessionID)
+    }
     const root = this.resolveRoot(sessionID)
     this.activeRoot = root
     this.latestRoot = root
@@ -317,6 +338,24 @@ export class Telemetry {
     const root = this.resolveRoot(sessionID)
     this.selected.set(root, { sel, seq: ++this.selSeq })
     this.lastSelected = sel
+  }
+
+  noteBaseline(sessionID: string, sel: SelectedRegime): void {
+    if (!sel.provider) return
+    const root = this.resolveRoot(sessionID)
+    if (this.selected.has(root)) return
+    this.selected.set(root, { sel, seq: ++this.selSeq })
+    this.lastSelected = sel
+  }
+
+  noteAgent(sessionID: string, agent: string): void {
+    const root = this.resolveRoot(sessionID)
+    const current = this.selected.get(root)
+    if (current) {
+      current.sel = { ...current.sel, agent }
+      return
+    }
+    if (this.lastSelected) this.lastSelected = { ...this.lastSelected, agent }
   }
 
   overrideSelection(sel: SelectedRegime): void {

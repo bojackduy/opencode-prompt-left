@@ -70,11 +70,14 @@ The estimate follows the **session you're currently viewing**, not a global "cur
 
 | Signal | How it works |
 |---|---|
-| Active session | The TUI plugin writes `active.json` with the session it renders; the server resolves selection, context, and calibration against it — switching sessions recomputes instantly |
-| Prompt submit | `chat.message` records the real per-prompt model/provider/agent per session |
-| Model picker bridge | `model.json` `recent[0]` → `selection.json` → applied to the **active** session |
+| Active session + model | The TUI plugin writes `active.json` with the session it renders **plus that session's last-used model** (read in-process from `api.state.session.messages`); the server applies it as the baseline for sessions it hasn't seen yet — restart, session switch, and cross-directory resume all converge within ~2.5s |
+| Prompt submit | `chat.message` + user-message events record the real per-prompt model/provider/agent per session |
+| Model picker bridge | `model.json` `recent[0]` → `selection.json` → wins while it's the freshest signal (covers picking a model before the next prompt) |
+| `session.next.model.switched` | handled if opencode ever emits it (future-proof; the local TUI doesn't call the switch API today) |
 | Model catalog | `client.provider.list()` — real names + context limits + pricing for every model (including auto-detected providers like `opencode-go`) |
 | Persisted | last active session + selection survive restarts |
+
+Selection priority: **real events → picker bridge (by recency) → active.json baseline (only when the session's selection is unknown)**. The one unobservable case is tab-cycling before the next prompt — opencode persists nothing for it, so it self-corrects at submit.
 
 ## Multi-directory isolation
 

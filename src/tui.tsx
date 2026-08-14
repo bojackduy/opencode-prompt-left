@@ -44,8 +44,8 @@ function writeSelection(path: string, model: { providerID: string; modelID: stri
   writeAtomic(path, sel, last)
 }
 
-function writeActive(path: string, sessionID: string, last: { value: string }): void {
-  const active: ActiveFile = { sessionID, at: Date.now() }
+function writeActive(path: string, sessionID: string, last: { value: string }, model?: { providerID: string; modelID: string }, agent?: string): void {
+  const active: ActiveFile = { sessionID, at: Date.now(), model, agent }
   writeAtomic(path, active, last)
 }
 
@@ -122,6 +122,32 @@ function StatusLine(props: { api: Parameters<TuiPlugin>[0]; estimate: EstimateFi
   )
 }
 
+function activeModel(api: Parameters<TuiPlugin>[0], sessionID: string): { providerID: string; modelID: string } | undefined {
+  try {
+    const messages = api.state.session.messages(sessionID)
+    const last = messages.at(-1)
+    if (!last) return undefined
+    if (last.role === "user" && last.model?.providerID && last.model?.modelID) {
+      return { providerID: last.model.providerID, modelID: last.model.modelID }
+    }
+    if (last.role === "assistant" && last.providerID && last.modelID) {
+      return { providerID: last.providerID, modelID: last.modelID }
+    }
+  } catch {}
+  return undefined
+}
+
+function activeAgent(api: Parameters<TuiPlugin>[0], sessionID: string): string | undefined {
+  try {
+    const messages = api.state.session.messages(sessionID)
+    const last = messages.at(-1)
+    if (!last) return undefined
+    if (last.role === "user") return last.agent
+    return last.mode
+  } catch {}
+  return undefined
+}
+
 function PromptArea(props: {
   api: Parameters<TuiPlugin>[0]
   estimate: EstimateFile | null
@@ -133,7 +159,14 @@ function PromptArea(props: {
 }) {
   const quotaActive = createMemo(() => quotaRendersPrompt(props.api))
   const activeLast = { value: "" }
-  const writeActiveNow = () => writeActive(paths.active, props.sessionID, activeLast)
+  const writeActiveNow = () =>
+    writeActive(
+      paths.active,
+      props.sessionID,
+      activeLast,
+      activeModel(props.api, props.sessionID),
+      activeAgent(props.api, props.sessionID),
+    )
   onMount(() => {
     writeActiveNow()
     const timer = setInterval(writeActiveNow, ACTIVE_WRITE_MS)

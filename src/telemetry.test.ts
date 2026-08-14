@@ -249,6 +249,35 @@ describe("Telemetry", () => {
     expect(t.activeSelected().model).toBe("flash")
     expect(t.activeSelected().provider).toBe("opencode-go")
   })
+
+  test("noteBaseline fills an unknown session but never overrides a known one", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    t.setActiveSession("ses_unknown")
+    t.noteBaseline("ses_unknown", { provider: "opencode-go", model: "flash", agent: "plan" })
+    expect(t.activeSelected()).toEqual({ provider: "opencode-go", model: "flash", agent: "plan" })
+    t.noteSelection("ses_unknown", { provider: "openai", model: "gpt", agent: "build" })
+    t.noteBaseline("ses_unknown", { provider: "opencode-go", model: "flash", agent: "plan" })
+    expect(t.activeSelected()).toEqual({ provider: "openai", model: "gpt", agent: "build" })
+  })
+
+  test("session.next.model.switched and agent.switched events update selection", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    t.setActiveSession("root")
+    t.handle(evt("session.next.model.switched", { sessionID: "root", model: { providerID: "openai", id: "gpt-5.6" } }))
+    expect(t.activeSelected()).toEqual({ provider: "openai", model: "gpt-5.6" })
+    t.handle(evt("session.next.agent.switched", { sessionID: "root", agent: "plan" }))
+    expect(t.activeSelected().agent).toBe("plan")
+  })
+
+  test("setActiveSession accepts sessions not seen in this instance", () => {
+    const t = new Telemetry(freshHistory())
+    t.setActiveSession("ses_never_seen")
+    expect(t.activeRoot).toBe("ses_never_seen")
+    t.noteBaseline("ses_never_seen", { provider: "opencode-go", model: "flash" })
+    expect(t.activeSelected().model).toBe("flash")
+  })
 })
 
 function emptyUsage() {

@@ -32,6 +32,8 @@ export function statePaths(key: string) {
 export interface ActiveFile {
   sessionID: string
   at: number
+  model?: { providerID: string; modelID: string }
+  agent?: string
 }
 
 export interface TuiSelection {

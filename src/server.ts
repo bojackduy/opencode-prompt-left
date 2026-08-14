@@ -32,6 +32,8 @@ const TRACKED_EVENTS = new Set([
   "session.deleted",
   "session.idle",
   "session.compacted",
+  "session.next.model.switched",
+  "session.next.agent.switched",
   "message.updated",
   "message.part.updated",
   "message.removed",
@@ -79,6 +81,13 @@ const plugin: Plugin = async ({ client }, _options) => {
     const active = readJson<ActiveFile>(paths.active)
     if (!active?.sessionID) return
     telemetry.setActiveSession(active.sessionID)
+    if (active.model?.providerID && active.model?.modelID) {
+      telemetry.noteBaseline(active.sessionID, {
+        provider: active.model.providerID,
+        model: active.model.modelID,
+        agent: active.agent,
+      })
+    }
   }
 
   function watchFiles() {
