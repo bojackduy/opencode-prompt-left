@@ -1,0 +1,29 @@
+{
+  "name": "opencode-prompt-left",
+  "version": "0.1.0",
+  "description": "Estimates how many similar prompts remain before provider quota runs out, shown in the OpenCode compact line.",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/server.ts",
+    "./server": "./src/server.ts",
+    "./tui": "./src/tui.tsx"
+  },
+  "engines": {
+    "opencode": "^1.0.0"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*",
+    "@opentui/core": "*",
+    "@opentui/solid": "*",
+    "solid-js": "*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.17.9",
+    "@opentui/core": "^0.4.1",
+    "@opentui/solid": "^0.4.1",
+    "@types/bun": "^1.3.14",
+    "solid-js": "^1.9.13",
+    "typescript": "^6.0.3"
+  }
+}
