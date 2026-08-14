@@ -228,16 +228,26 @@ describe("Telemetry", () => {
     expect(t.contextNow()).toBe(5000)
   })
 
-  test("overrideSelection applies to the active session", () => {
+  test("overrideSelection wins while it is the freshest signal", () => {
     const t = new Telemetry(freshHistory())
     seed(t)
     t.handle(sessionCreated("b"))
     t.noteSelection("root", { provider: "opencode-go", model: "flash", agent: "build" })
-    t.setActiveSession("b")
     t.overrideSelection({ provider: "openai", model: "gpt" })
     expect(t.activeSelected()).toEqual({ provider: "openai", model: "gpt" })
     t.setActiveSession("root")
-    expect(t.activeSelected()).toEqual({ provider: "opencode-go", model: "flash", agent: "build" })
+    expect(t.activeSelected()).toEqual({ provider: "openai", model: "gpt" })
+  })
+
+  test("a newer prompt selection overrides the picker", () => {
+    const t = new Telemetry(freshHistory())
+    seed(t)
+    t.setActiveSession("root")
+    t.overrideSelection({ provider: "openai", model: "gpt" })
+    expect(t.activeSelected().model).toBe("gpt")
+    t.noteSelection("root", { provider: "opencode-go", model: "flash", agent: "build" })
+    expect(t.activeSelected().model).toBe("flash")
+    expect(t.activeSelected().provider).toBe("opencode-go")
   })
 })
 

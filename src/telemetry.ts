@@ -18,9 +18,11 @@ export class Telemetry {
   private seenStepParts = new Set<string>()
   private seenToolParts = new Set<string>()
   private idle = new Set<string>()
-  private selected = new Map<string, SelectedRegime>()
+  private selected = new Map<string, { sel: SelectedRegime; seq: number }>()
+  private picker?: { sel: SelectedRegime; seq: number }
   private lastContext = new Map<string, number>()
   private promptSeq = 0
+  private selSeq = 0
 
   finished: RootPrompt[] = []
   lastSelected?: SelectedRegime
@@ -233,7 +235,7 @@ export class Telemetry {
     this.finalize(rootSessionID)
     if (provider) {
       const sel = { provider, model, agent }
-      this.selected.set(rootSessionID, sel)
+      this.selected.set(rootSessionID, { sel, seq: ++this.selSeq })
       this.lastSelected = sel
     }
     const prompt: RootPrompt = {
@@ -313,23 +315,21 @@ export class Telemetry {
     if (!sel.provider) return
     if (!this.isRootSession(sessionID)) return
     const root = this.resolveRoot(sessionID)
-    this.selected.set(root, sel)
+    this.selected.set(root, { sel, seq: ++this.selSeq })
     this.lastSelected = sel
   }
 
   overrideSelection(sel: SelectedRegime): void {
     if (!sel.provider) return
-    const root = this.activeRoot ?? this.latestRoot
-    if (root) this.selected.set(root, sel)
+    this.picker = { sel, seq: ++this.selSeq }
     this.lastSelected = sel
   }
 
   activeSelected(): SelectedRegime {
     const root = this.activeRoot ?? this.latestRoot
-    if (root) {
-      const sel = this.selected.get(root)
-      if (sel?.provider) return sel
-    }
+    const s = root ? this.selected.get(root) : undefined
+    if (this.picker && (!s || this.picker.seq > s.seq)) return this.picker.sel
+    if (s) return s.sel
     return this.lastSelected ?? {}
   }
 }
