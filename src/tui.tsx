@@ -235,6 +235,12 @@ function DetailView(props: { api: Parameters<TuiPlugin>[0]; estimate: () => Esti
         const costLine = cost > 0 ? ` · $${cost.toFixed(4)}/prompt` : ""
         out.push({ text: `  plan budget $${e.binding.budget} · $${(e.binding.remainingUSD ?? 0).toFixed(2)} left${costLine}`, fg: theme.textMuted })
       }
+      if (e.binding.method === "limit" && e.binding.limit) {
+        const unit = e.binding.limitUnit === "tokens" ? "tokens" : "requests"
+        const per = e.binding.limitUnit === "tokens" ? (e.forecast?.tokens ?? 0) : (e.forecast?.requests ?? 0)
+        const perLine = per > 0 ? ` · ${per.toFixed(1)} ${unit}/prompt` : ""
+        out.push({ text: `  plan limit ${e.binding.limit} ${unit} · ${(e.binding.remainingAbs ?? 0).toFixed(0)} left${perLine}`, fg: theme.textMuted })
+      }
       if (e.binding.resetAt) out.push({ text: `  resets in ${fmtCountdown(e.binding.resetAt)}`, fg: theme.textMuted })
     }
     out.push({ text: "", fg: theme.text })
@@ -268,6 +274,10 @@ function DetailView(props: { api: Parameters<TuiPlugin>[0]; estimate: () => Esti
       if (e.context.untilCompaction !== null) {
         out.push({ text: `  compaction in ~${e.context.untilCompaction} similar turns`, fg: theme.textMuted })
       }
+    }
+    if (e.status === "no-quota" && e.selected.provider) {
+      out.push({ text: "", fg: theme.text })
+      out.push({ text: `no quota tracked for ${e.selected.provider} — free model or not enabled in opencode-quota`, fg: theme.warning })
     }
     out.push({ text: "", fg: theme.text })
     out.push({ text: `calibration: ${e.forecast?.sampleCount ?? 0} prompt samples · ${e.calibration.rateObs} quota obs · quota age ${Math.round(e.calibration.quotaAgeSec)}s`, fg: theme.textMuted })

@@ -4,7 +4,7 @@ import { watch, mkdirSync, statSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { Telemetry } from "./telemetry"
 import { readQuotaSnapshot } from "./quota"
-import { loadBudgets } from "./budget"
+import { loadPlans, type Plans } from "./budget"
 import { computeEstimate, type EstimateInput } from "./calibrator"
 import {
   CONFIG_PATH,
@@ -57,7 +57,7 @@ const plugin: Plugin = async ({ client }, _options) => {
   if (history.activeSession) telemetry.setActiveSession(history.activeSession)
 
   const modelCatalog = new Map<string, ModelInfo>()
-  let budgets = loadBudgets()
+  let plans: Plans = loadPlans()
   let quota = readQuotaSnapshot()
   let lastSnapAt = 0
   let pollTimer: ReturnType<typeof setInterval> | undefined
@@ -264,7 +264,9 @@ const plugin: Plugin = async ({ client }, _options) => {
       contextNow: telemetry.contextNow(),
       usableContext: usableContext(selected.provider, selected.model),
       externalShare: history.externalShare,
-      windowBudgets: selected.provider ? budgets[selected.provider] : undefined,
+      windowBudgets: selected.provider ? plans.budgets[selected.provider] : undefined,
+      windowLimits: selected.provider ? plans.limits[selected.provider] : undefined,
+      windowTokenLimits: selected.provider ? plans.tokenLimits[selected.provider] : undefined,
     }
     const estimate: EstimateFile = computeEstimate(input)
     writeJsonAtomic(paths.estimate, estimate)
@@ -277,7 +279,7 @@ const plugin: Plugin = async ({ client }, _options) => {
         const stat = statSync(CONFIG_PATH)
         if (stat.mtimeMs === lastMtime) return
         lastMtime = stat.mtimeMs
-        budgets = loadBudgets()
+        plans = loadPlans()
         recompute()
       } catch {
         lastMtime = 0

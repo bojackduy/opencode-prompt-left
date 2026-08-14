@@ -153,6 +153,7 @@ export interface PromptForecast {
   compactionCost: number
   compactionRate: number
   costCv: number
+  tokens: number
 }
 
 export interface ContextEstimate {
@@ -190,9 +191,12 @@ export interface EstimateFile {
     remaining: number
     burnPP: number | null
     resetAt?: number
-    method?: "budget" | "rate" | "prior"
+    method?: "budget" | "limit" | "rate" | "prior"
     budget?: number
     remainingUSD?: number
+    limit?: number
+    limitUnit?: "requests" | "tokens"
+    remainingAbs?: number
   } | null
   perProvider: PerProviderEstimate[]
   forecast: PromptForecast | null

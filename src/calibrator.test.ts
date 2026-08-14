@@ -49,6 +49,7 @@ function forecast(overrides: Partial<PromptForecast> = {}): PromptForecast {
     compactionCost: 0.05,
     compactionRate: 0,
     costCv: 0,
+    tokens: 253_000,
     ...overrides,
   }
 }
@@ -285,6 +286,105 @@ describe("computeEstimate", () => {
     expect(est.likely).toBeNull()
     expect(est.binding?.method).toBe("budget")
     expect(est.compact).toBe("opencode-go/m $2.10 left · Weekly")
+  })
+
+  test("request-limit estimate converts remaining percent via requests per prompt", () => {
+    const prompts = [
+      prompt({ finishedAt: 1, provider: "openai", model: "gpt", agent: "build", byProvider: { openai: usage({ cost: 0, requests: 10 }) } }),
+      prompt({ finishedAt: 2, provider: "openai", model: "gpt", agent: "build", byProvider: { openai: usage({ cost: 0, requests: 10 }) } }),
+    ]
+    const est = computeEstimate({
+      now: 1_000_010,
+      quota,
+      prompts,
+      windows: {},
+      selected: { provider: "openai", model: "gpt", agent: "build" },
+      contextNow: null,
+      usableContext: null,
+      externalShare: 0,
+      windowLimits: { Weekly: 8000 },
+    })
+    // openai Weekly 85% → 6800 requests left → 6800/10 = 680 prompts
+    expect(est.status).toBe("ready")
+    expect(est.binding?.method).toBe("limit")
+    expect(est.binding?.limitUnit).toBe("requests")
+    expect(est.binding?.remainingAbs).toBeCloseTo(6800)
+    expect(est.likely).toBe(680)
+    expect(est.compact).toBe(`openai/gpt ≈680 prompts · Weekly`)
+  })
+
+  test("token-limit estimate uses tokens per prompt", () => {
+    const prompts = [
+      prompt({ finishedAt: 1, provider: "ollama-cloud", model: "q", agent: "b", byProvider: { "ollama-cloud": { ...usage({ cost: 0 }), input: 100_000, cacheRead: 900_000, output: 10_000 } } }),
+      prompt({ finishedAt: 2, provider: "ollama-cloud", model: "q", agent: "b", byProvider: { "ollama-cloud": { ...usage({ cost: 0 }), input: 100_000, cacheRead: 900_000, output: 10_000 } } }),
+    ]
+    const est = computeEstimate({
+      now: 1_000_010,
+      quota: { at: 1_000_000, fromExport: true, entries: [
+        { provider: "ollama-cloud", name: "Ollama Cloud Weekly", window: "Weekly", percentRemaining: 49.2 },
+      ] },
+      prompts,
+      windows: {},
+      selected: { provider: "ollama-cloud", model: "q", agent: "b" },
+      contextNow: null,
+      usableContext: null,
+      externalShare: 0,
+      windowTokenLimits: { Weekly: 1_000_000 },
+    })
+    // 1M × 49.2% = 492k tokens left; per prompt 1.01M tokens → 0 prompts... use smaller per-prompt
+    // tokens per prompt = 100k+900k+10k = 1.01M → floor(492000/1010000)=0
+    expect(est.binding?.method).toBe("limit")
+    expect(est.binding?.limitUnit).toBe("tokens")
+    expect(est.likely).toBe(Math.floor((1_000_000 * 0.492) / 1_010_000))
+  })
+
+  test("budget wins over limit when both are configured", () => {
+    const prompts = [
+      prompt({ finishedAt: 1, provider: "opencode-go", model: "m", agent: "b", byProvider: { "opencode-go": usage({ cost: 0.05, requests: 10 }) } }),
+    ]
+    const est = computeEstimate({
+      now: 1_000_010,
+      quota,
+      prompts,
+      windows: {},
+      selected: { provider: "opencode-go", model: "m", agent: "b" },
+      contextNow: null,
+      usableContext: null,
+      externalShare: 0,
+      windowBudgets: { "5h": 12, Weekly: 30, Monthly: 60 },
+      windowLimits: { Weekly: 100 },
+    })
+    expect(est.binding?.method).toBe("budget")
+  })
+
+  test("untracked provider shows no-quota instead of calibrating", () => {
+    const est = computeEstimate({
+      now: 1_000_010,
+      quota,
+      prompts: [],
+      windows: {},
+      selected: { provider: "claude-code-ollama", model: "gpt-oss" },
+      contextNow: null,
+      usableContext: null,
+      externalShare: 0,
+    })
+    expect(est.status).toBe("no-quota")
+    expect(est.compact).toBe("no quota · claude-code-ollama")
+  })
+
+  test("missing provider selection shows a transient no-model state", () => {
+    const est = computeEstimate({
+      now: 1_000_010,
+      quota,
+      prompts: [],
+      windows: {},
+      selected: {},
+      contextNow: null,
+      usableContext: null,
+      externalShare: 0,
+    })
+    expect(est.status).toBe("no-quota")
+    expect(est.compact).toBe("no model yet")
   })
 
   test("cold start uses a prior burn when no prompts exist", () => {

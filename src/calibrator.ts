@@ -99,6 +99,7 @@ export function buildForecast(
   if (rows.length === 0) return null
 
   const cost = weighted(rows.map((u) => u.cost))
+  const tokens = weighted(rows.map((u) => u.input + u.cacheRead + u.cacheWrite + u.output + u.reasoning))
   const growthCandidates = list
     .filter((p) => !p.compacted && p.contextAfter !== undefined)
     .map((p) => Math.max(0, (p.contextAfter ?? 0) - p.contextBefore))
@@ -113,6 +114,7 @@ export function buildForecast(
     sampleCount: rows.length,
     fallbackLevel,
     cost,
+    tokens,
     requests: weighted(rows.map((u) => u.requests)),
     input: weighted(rows.map((u) => u.input)),
     cacheRead: weighted(rows.map((u) => u.cacheRead)),
@@ -188,6 +190,8 @@ export function windowEstimates(input: {
   contextNow: number | null
   usable: number | null
   budgets?: Record<string, number>
+  limits?: Record<string, number>
+  tokenLimits?: Record<string, number>
 }): WindowEstimate[] {
   return input.quota.entries
     .filter((e) => e.provider === input.provider)
@@ -195,19 +199,22 @@ export function windowEstimates(input: {
       const tracker = input.windows[`${e.provider}::${e.name}`]
       const stats = tracker ? rateStats(tracker.observations) : null
       const remaining = e.percentRemaining ?? 0
-      const budget = input.budgets?.[e.window ?? e.name]
       const prompts =
-        budget && input.forecast
-          ? budgetPrompts(remaining, budget, input.forecast.cost)
-          : input.forecast && stats
-            ? simulatePrompts({
-                forecast: input.forecast,
-                rate: stats.median,
-                remaining,
-                contextNow: input.contextNow,
-                usable: input.usable,
-              })
-            : null
+        input.forecast && planValue(input.budgets, e) && input.forecast.cost > 0
+          ? budgetPrompts(remaining, planValue(input.budgets, e)!, input.forecast.cost)
+          : input.forecast && planValue(input.limits, e) && input.forecast.requests > 0
+            ? limitPrompts(remaining, planValue(input.limits, e)!, input.forecast.requests)
+            : input.forecast && planValue(input.tokenLimits, e) && input.forecast.tokens > 0
+              ? limitPrompts(remaining, planValue(input.tokenLimits, e)!, input.forecast.tokens)
+              : input.forecast && stats
+                ? simulatePrompts({
+                    forecast: input.forecast,
+                    rate: stats.median,
+                    remaining,
+                    contextNow: input.contextNow,
+                    usable: input.usable,
+                  })
+                : null
       return {
         window: e.window ?? e.name,
         remaining,
@@ -249,6 +256,13 @@ export interface EstimateInput {
   usableContext: number | null
   externalShare: number
   windowBudgets?: Record<string, number>
+  windowLimits?: Record<string, number>
+  windowTokenLimits?: Record<string, number>
+}
+
+function planValue(map: Record<string, number> | undefined, e: QuotaSnapshot["entries"][number]): number | undefined {
+  if (!map) return undefined
+  return map[e.window ?? ""] ?? map[e.name]
 }
 
 function compactPrefix(selected: SelectedRegime): string {
@@ -256,14 +270,23 @@ function compactPrefix(selected: SelectedRegime): string {
   return ""
 }
 
+function safeFactor(cv: number, n: number): number {
+  if (n < 3) return 1.5
+  return 1 + Math.max(1.28 * cv, 0.05)
+}
+
 function safeCost(cost: number, cv: number, n: number): number {
-  if (n < 3) return cost * 1.5
-  return cost + Math.max(1.28 * cost * cv, 0.05 * cost)
+  return cost * safeFactor(cv, n)
 }
 
 function budgetPrompts(remainingPct: number, budget: number, cost: number): number | null {
   if (!budget || budget <= 0 || !cost || cost <= 0) return null
   return Math.floor(((budget * remainingPct) / 100) / cost)
+}
+
+function limitPrompts(remainingPct: number, limit: number, perPrompt: number): number | null {
+  if (!limit || limit <= 0 || !perPrompt || perPrompt <= 0) return null
+  return Math.floor(((limit * remainingPct) / 100) / perPrompt)
 }
 
 function worstBudgetEntry(
@@ -272,7 +295,7 @@ function worstBudgetEntry(
 ): { entry: QuotaSnapshot["entries"][number]; budget: number } | null {
   let best: { entry: QuotaSnapshot["entries"][number]; budget: number; usd: number } | null = null
   for (const e of selectedProviderEntries) {
-    const budget = windowBudgets?.[e.window ?? e.name]
+    const budget = planValue(windowBudgets, e)
     if (!budget || budget <= 0) continue
     const usd = (budget * (e.percentRemaining ?? 0)) / 100
     if (!best || usd < best.usd) {
@@ -397,13 +420,22 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
         contextNow: input.contextNow,
         usable: input.usableContext,
         budgets: provider === selected.provider ? input.windowBudgets : undefined,
+        limits: provider === selected.provider ? input.windowLimits : undefined,
+        tokenLimits: provider === selected.provider ? input.windowTokenLimits : undefined,
       }),
     }
   })
 
   if (selectedProviderEntries.length === 0) {
-    base.status = "calibrating"
-    base.compact = "calibrating…"
+    if (!selected.provider) {
+      base.status = "no-quota"
+      base.compact = "no model yet"
+      return base
+    }
+    base.status = "no-quota"
+    base.compact = `no quota · ${selected.provider}`
+    base.confidence = 0
+    base.confidenceLabel = "low"
     return base
   }
 
@@ -418,22 +450,39 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   let binding: EstimateFile["binding"] = null
   let bindingPrompts = Number.POSITIVE_INFINITY
   let bindingSafe: number | null = null
-  let bindingMethod: "budget" | "rate" = "rate"
+  let bindingMethod: "budget" | "limit" | "rate" = "rate"
   let bindingCv = 0
   let rateObsCount = 0
   for (const e of selectedProviderEntries) {
     const remaining = e.percentRemaining ?? 0
-    const budget = input.windowBudgets?.[e.window ?? e.name]
+    const budget = planValue(input.windowBudgets, e)
+    const limit = planValue(input.windowLimits, e)
+    const tokenLimit = planValue(input.windowTokenLimits, e)
     let best: number | null = null
     let safe: number | null = null
     let burnPP: number | null = null
-    let method: "budget" | "rate" = "rate"
+    let method: "budget" | "limit" | "rate" = "rate"
     let stats: RateStats | null = null
+    let limitUnit: "requests" | "tokens" | undefined
     if (budget && forecast.cost > 0) {
       best = budgetPrompts(remaining, budget, forecast.cost)
       safe = budgetPrompts(remaining, budget, safeCost(forecast.cost, forecast.costCv, forecast.sampleCount))
       burnPP = (forecast.cost / budget) * 100
       method = "budget"
+    } else if (limit && forecast.requests > 0) {
+      best = limitPrompts(remaining, limit, forecast.requests)
+      safe = limitPrompts(
+        remaining,
+        limit,
+        forecast.requests * safeFactor(forecast.costCv, forecast.sampleCount),
+      )
+      limitUnit = "requests"
+      method = "limit"
+    } else if (tokenLimit && forecast.tokens > 0) {
+      best = limitPrompts(remaining, tokenLimit, forecast.tokens)
+      safe = limitPrompts(remaining, tokenLimit, forecast.tokens * safeFactor(forecast.costCv, forecast.sampleCount))
+      limitUnit = "tokens"
+      method = "limit"
     } else {
       const tracker = input.windows[`${e.provider}::${e.name}`]
       stats = tracker ? rateStats(tracker.observations) : null
@@ -462,7 +511,8 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
       bindingPrompts = best
       bindingSafe = safe
       bindingMethod = method
-      bindingCv = method === "budget" ? forecast.costCv : (stats?.cv ?? 0)
+      bindingCv = method === "rate" ? (stats?.cv ?? 0) : forecast.costCv
+      const limitValue = method === "limit" ? (limitUnit === "tokens" ? tokenLimit : limit) : undefined
       binding = {
         provider: e.provider,
         window: e.window ?? e.name,
@@ -472,6 +522,10 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
         method,
         budget: method === "budget" ? budget : undefined,
         remainingUSD: method === "budget" && budget ? (budget * remaining) / 100 : undefined,
+        limit: limitValue,
+        limitUnit: method === "limit" ? limitUnit : undefined,
+        remainingAbs:
+          method === "limit" && limitValue ? (limitValue * remaining) / 100 : undefined,
       }
     }
   }
@@ -483,7 +537,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   }
 
   const confidence = confidenceScore({
-    n: Math.min(bindingMethod === "budget" ? forecast.sampleCount : rateObsCount, 10),
+    n: Math.min(bindingMethod === "rate" ? rateObsCount : forecast.sampleCount, 10),
     fallbackLevel,
     quotaAgeSec,
     externalShare: input.externalShare,

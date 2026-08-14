@@ -43,8 +43,10 @@ binds over 5h).
 | Compact line | Meaning |
 |---|---|
 | `opencode-go/deepseek-v4-flash ≈54 prompts · Weekly` | plan-budget estimate (real per-prompt cost ÷ remaining dollars), green/yellow/red by capacity |
+| `copilot/gpt-5.6 ≈0 prompts · Copilot` | plan-limit estimate (remaining requests ÷ requests per prompt) |
 | `opencode-go/deepseek-v4-flash $1.20 left · Weekly` | budget known but no usage history yet — exact dollars, count appears after a few prompts |
-| `≈2 prompts · Weekly` (low confidence) | prior estimate — no budget config and no observations |
+| `no quota · claude-code-ollama` | provider is not tracked by opencode-quota (free model, local provider, or not enabled) |
+| `≈2 prompts · Weekly` (low confidence) | prior estimate — no plan limit and no observations |
 | `no quota` | no usable quota export found |
 
 `/prompts-left` opens the full breakdown: best/safe counts, binding window + reset countdown, per-provider windows, forecast per prompt (cost, requests, tools, cache), context/compaction horizon, and calibration stats.
@@ -144,38 +146,77 @@ Either way both plugins stay fully enabled.
 
 ## Install
 
+Install from npm (published as `opencode-prompt-left`). The same package
+provides both the server plugin and the TUI plugin — opencode resolves the
+right entrypoint (`./server` / `./tui`) from the config file it appears in:
+
 ```jsonc
 // opencode.jsonc
 {
-  "plugin": ["/path/to/opencode-prompt-left/src/server.ts"]
+  "plugin": ["opencode-prompt-left"]
 }
 ```
 
 ```jsonc
 // tui.json
 {
-  "plugin": ["/path/to/opencode-prompt-left/src/tui.tsx"]
+  "plugin": ["opencode-prompt-left"]
 }
 ```
+
+> To use a local clone instead (development):
+>
+> ```jsonc
+> // opencode.jsonc
+> { "plugin": ["/path/to/opencode-prompt-left/src/server.ts"] }
+> // tui.json
+> { "plugin": ["/path/to/opencode-prompt-left/src/tui.tsx"] }
+> ```
+
+(The npm entry requires `opencode-prompt-left` to be published — see
+[Releasing](#releasing) for the initial manual publish.)
 
 Restart OpenCode. State persists per project directory at `$XDG_CACHE_HOME/opencode/prompt-left/<workspace-hash>/`:
 
 - `history.json` — root-prompt usage telemetry and per-window quota-rate observations (survives restarts)
 - `estimate.json` — the current estimate, consumed by the TUI
 
-## Plan budgets
+## Plan limits
 
-`~/.config/opencode/prompt-left.json` overrides plan budgets (defaults apply without the file):
+`~/.config/opencode/prompt-left.json` lets you give any provider an exact
+conversion from its reported percentage to prompts. Three kinds of limits are
+supported; the estimator uses the first that applies per window:
+
+| Kind | Field | Converts via | Defaults (built in) |
+|---|---|---|---|
+| Dollar budget | `budgets` | per-prompt **cost** | `opencode-go`: $12/5h, $30/week, $60/month |
+| Request limit | `limits` | per-prompt **requests** | `copilot`: 300 premium interactions/month (Pro) |
+| Token allowance | `tokenLimits` | per-prompt **tokens** | — |
 
 ```jsonc
+// ~/.config/opencode/prompt-left.json
 {
   "budgets": {
     "opencode-go": { "5h": 12, "Weekly": 30, "Monthly": 60 }
+  },
+  "limits": {
+    "openai": { "Weekly": 8000 }          // e.g. GPT-5.6 tier, plan-page value
+  },
+  "tokenLimits": {
+    "ollama-cloud": { "Weekly": 1000000 } // from your ollama.com plan page
   }
 }
 ```
 
-Defaults (from the OpenCode Go plan docs): `opencode-go` → $12 / 5h, $30 / week, $60 / month. Add entries for other providers to give them the same exact-dollar treatment. The file is watched — edits apply on the next recompute.
+Window keys match the quota provider's labels (`5h`, `Weekly`, `Monthly`,
+`Session`, …); the entry name is also matched as a fallback. Without a plan
+limit, a provider falls back to observed quota-per-dollar rates, then to a
+prior placeholder. The file is watched — edits apply on the next recompute.
+
+Plan values for other providers are config-driven because they depend on your
+plan tier (and aren't exposed by the quota APIs — opencode-quota itself only
+sees percentages; the OpenCode Go numbers come from the public usage-limits
+docs).
 
 ## Development
 
