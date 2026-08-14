@@ -162,6 +162,23 @@ bunx tsc --noEmit
 bun test
 ```
 
+## Releasing
+
+Releases are tag-triggered and published with **trusted publishing** (OIDC — no
+npm token in CI, provenance attestations included).
+
+- First release: publish manually once so the package exists on npm:
+  `npm publish --access public` (after that, CI can publish via OIDC).
+- Subsequent releases:
+
+```sh
+bun run release:patch   # or release:minor / release:major
+```
+
+This bumps the version, creates the `v*.*.*` tag, pushes it, and the
+`Publish npm package` workflow runs typecheck/test/build and publishes with
+provenance.
+
 ## Notes and limitations
 
 - Estimates are statistical. "≈N similar prompts" means *if you keep prompting like your recent root prompts do, in the current context state*.
