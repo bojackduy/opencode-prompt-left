@@ -217,6 +217,20 @@ describe("computeEstimate", () => {
     expect(est.confidenceLabel).toBe("low")
   })
 
+  test("model label prefixes the compact line", () => {
+    const est = computeEstimate({
+      now: 1_000_010,
+      quota,
+      regimeSamples: {},
+      selected: { provider: "openai", model: "gpt", agent: "build" },
+      externalShare: 0,
+      rootTurns: 0,
+      modelLabel: "GPT 5.6",
+      context: ctx,
+    })
+    expect(est.compact).toBe(`GPT 5.6 ≈${Math.floor(37 / 2.5)} prompts · 5h`)
+  })
+
   test("calibrating without a selected provider does not panic across providers", () => {
     const est = computeEstimate({
       now: 1_000_010,

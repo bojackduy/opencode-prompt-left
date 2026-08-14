@@ -3,35 +3,16 @@ import type { JSX } from "@opentui/solid"
 import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { Show, For, createMemo, createSignal, onCleanup } from "solid-js"
 import { readFileSync } from "node:fs"
-import { join } from "node:path"
 import { ESTIMATE_PATH, type EstimateFile } from "./shared"
 
 const POLL_INTERVAL_MS = 2_500
-const SLOT_ORDER = 95
+const SLOT_ORDER = 100
 
 function loadEstimate(): EstimateFile | null {
   try {
     return JSON.parse(readFileSync(ESTIMATE_PATH, "utf8")) as EstimateFile
   } catch {
     return null
-  }
-}
-
-function quotaRendersPrompt(api: Parameters<TuiPlugin>[0]): boolean {
-  const quota = api.plugins
-    .list()
-    .find((p) => p.id.startsWith("@slkiser/opencode-quota") || p.id === "opencode-quota")
-  if (!quota?.active) return false
-  try {
-    const sidecar = JSON.parse(
-      readFileSync(join(api.state.path.config, "opencode-quota", "quota-toast.json"), "utf8"),
-    ) as { tuiCompactStatus?: { enabled?: boolean; sessionPrompt?: boolean } }
-    const compact = sidecar.tuiCompactStatus
-    if (!compact) return false
-    if (compact.enabled === false) return false
-    return compact.sessionPrompt === true
-  } catch {
-    return false
   }
 }
 
@@ -45,44 +26,15 @@ function compactFg(e: EstimateFile, api: Parameters<TuiPlugin>[0]) {
   return t.error
 }
 
-function StatusLine(props: { api: Parameters<TuiPlugin>[0]; estimate: EstimateFile | null }) {
-  const theme = props.api.theme.current
+function CompactStatus(props: { api: Parameters<TuiPlugin>[0]; estimate: EstimateFile | null }) {
+  const fg = () => (props.estimate ? compactFg(props.estimate, props.api) : props.api.theme.current.textMuted)
   const text = () => props.estimate?.compact ?? ""
-  const fg = () => (props.estimate ? compactFg(props.estimate, props.api) : theme.textMuted)
   return (
     <Show when={text().length > 0}>
-      <box flexDirection="row" justifyContent="flex-end">
-        <text fg={fg()} wrapMode="none">
-          {text()}
-        </text>
-      </box>
+      <text fg={fg()} wrapMode="none">
+        {` ${text()}`}
+      </text>
     </Show>
-  )
-}
-
-function PromptArea(props: {
-  api: Parameters<TuiPlugin>[0]
-  estimate: EstimateFile | null
-  sessionID: string
-  visible?: boolean
-  disabled?: boolean
-  on_submit?: () => void
-  ref?: (ref: unknown) => void
-}) {
-  const quotaActive = createMemo(() => quotaRendersPrompt(props.api))
-  return (
-    <box gap={0}>
-      <Show when={!quotaActive()}>
-        <props.api.ui.Prompt
-          sessionID={props.sessionID}
-          visible={props.visible}
-          disabled={props.disabled}
-          onSubmit={props.on_submit}
-          ref={props.ref}
-        />
-      </Show>
-      <StatusLine api={props.api} estimate={props.estimate} />
-    </box>
   )
 }
 
@@ -112,6 +64,10 @@ function DetailView(props: { api: Parameters<TuiPlugin>[0]; estimate: () => Esti
     }
     const head = e.status === "ready" ? `≈${e.safe} similar prompts left` : e.compact
     out.push({ text: head, fg: theme.text })
+    if (e.selected.provider) {
+      const regime = [e.selected.model, e.selected.agent].filter(Boolean).join(" · ")
+      out.push({ text: `tracking ${e.selected.provider}${regime ? ` · ${regime}` : ""}`, fg: theme.textMuted })
+    }
     if (e.status === "ready" && e.likely !== null) {
       out.push({ text: `likely ${e.likely} · safe ${e.safe} · ${e.confidenceLabel} confidence (${(e.confidence * 100).toFixed(0)}%)`, fg: theme.textMuted })
     }
@@ -177,18 +133,8 @@ const tui: TuiPlugin = async (api) => {
   api.slots.register({
     order: SLOT_ORDER,
     slots: {
-      session_prompt(_ctx, props: { session_id: string; visible?: boolean; disabled?: boolean; on_submit?: () => void; ref?: (ref: unknown) => void }) {
-        return (
-          <PromptArea
-            api={api}
-            estimate={estimate()}
-            sessionID={props.session_id}
-            visible={props.visible}
-            disabled={props.disabled}
-            on_submit={props.on_submit}
-            ref={props.ref}
-          />
-        )
+      session_prompt_right(_ctx, _props: { session_id: string }) {
+        return <CompactStatus api={api} estimate={estimate()} />
       },
     },
   })

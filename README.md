@@ -33,12 +33,35 @@ prompts left ≈ floor( percentRemaining / P90(burn per similar root prompt) )
 
 ## Coexisting with opencode-quota
 
-prompt-left renders its line below the prompt bar, exactly like opencode-quota's compact status line. Both can stay enabled:
+Both lines are visible at the same time:
 
-- If opencode-quota's `tuiCompactStatus.sessionPrompt` is `true`, quota owns the prompt bar and prompt-left appends its own line right below quota's.
-- If quota's session prompt is disabled, prompt-left renders the prompt bar itself and keeps its line.
+- opencode-quota keeps its prompt bar + its own compact line (sessionPrompt stays `true`).
+- prompt-left renders inline at the right of the prompt input via the `session_prompt_right` slot.
 
-No configuration is required either way.
+This requires a one-line patch to opencode-quota (it replaces the host prompt bar, which is where the right-slot lives). The patched local build is loaded instead of the npm package:
+
+```diff
+// ~/Code/opencode-quota/src/tui.tsx — SessionPromptWithCompactStatus
+  <props.api.ui.Prompt
+    sessionID={props.sessionID}
+    visible={props.visible}
+    disabled={props.disabled}
+    onSubmit={props.onSubmit}
+    ref={props.promptRef}
++   right={<props.api.ui.Slot name="session_prompt_right" session_id={props.sessionID} />}
+  />
+```
+
+plus the matching `ui.Slot` entry in `src/types/tui-runtime-shims.d.ts`, then `pnpm install && pnpm run build`, and:
+
+```jsonc
+// tui.json
+{ "plugin": ["/Users/duytrinh/Code/opencode-quota/"] }
+// opencode.jsonc
+{ "plugin": ["/Users/duytrinh/Code/opencode-quota/"] }
+```
+
+Without the patch, quota's replacement bar discards the right-slot and the line only appears when `sessionPrompt` is `false`.
 
 ## Requirements
 

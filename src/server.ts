@@ -38,6 +38,7 @@ const plugin: Plugin = async ({ client }, _options) => {
   const telemetry = new Telemetry(history)
 
   const modelLimits = new Map<string, { context?: number; output?: number }>()
+  const modelNames = new Map<string, string>()
   let quota = readQuotaSnapshot()
   let lastSnapAt = 0
   let pollTimer: ReturnType<typeof setInterval> | undefined
@@ -61,10 +62,11 @@ const plugin: Plugin = async ({ client }, _options) => {
     }
     try {
       const cfg = await client.config.get()
-      const providers = (cfg.data?.provider ?? {}) as Record<string, { models?: Record<string, { limit?: { context?: number; input?: number; output?: number } }> }>
+      const providers = (cfg.data?.provider ?? {}) as Record<string, { models?: Record<string, { name?: string; limit?: { context?: number; input?: number; output?: number } }> }>
       for (const [pid, p] of Object.entries(providers)) {
         for (const [mid, m] of Object.entries(p.models ?? {})) {
           modelLimits.set(mid, { context: m.limit?.context, output: m.limit?.output })
+          if (m.name) modelNames.set(mid, m.name)
         }
       }
     } catch (err) {
@@ -145,6 +147,7 @@ const plugin: Plugin = async ({ client }, _options) => {
       selected,
       externalShare: history.externalShare,
       rootTurns: telemetry.finished.length,
+      modelLabel: selected.model ? (modelNames.get(selected.model) ?? selected.model) : undefined,
       context,
     }
     const estimate: EstimateFile = computeEstimate(input)

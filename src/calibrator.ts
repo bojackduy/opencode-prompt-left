@@ -124,6 +124,7 @@ export interface EstimateInput {
   selected: SelectedRegime
   externalShare: number
   rootTurns: number
+  modelLabel?: string
   context: ContextEstimate
 }
 
@@ -216,6 +217,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
     base.confidenceLabel = confidenceLabel(base.confidence)
     base.calibration.usingPrior = true
     base.calibration.fallbackLevel = 3
+    base.compact = labelCompact(base.compact, input.modelLabel)
     return base
   }
 
@@ -254,7 +256,13 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   base.binding = binding
   base.calibration.regimeTurns = n
   base.calibration.fallbackLevel = fallbackLevel
+  base.compact = labelCompact(base.compact, input.modelLabel)
   return base
+}
+
+function labelCompact(compact: string, modelLabel?: string): string {
+  if (!modelLabel) return compact
+  return `${modelLabel} ${compact}`
 }
 
 export function contextGrowthPerTurn(turns: RootTurn[]): number | null {
