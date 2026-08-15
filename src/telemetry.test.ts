@@ -271,6 +271,19 @@ describe("Telemetry", () => {
     expect(t.activeSelected().agent).toBe("plan")
   })
 
+  test("costFn fills zero-cost usage at finalize using model pricing", () => {
+    const costFn = (_provider: string, _model: string | undefined, u: ReturnType<typeof emptyUsage>) =>
+      (u.input * 0.5 + u.output * 2 + u.cacheRead * 0.05) / 1_000_000
+    const t = new Telemetry(freshHistory(), costFn)
+    seed(t)
+    t.beginPrompt("root", "build", "openai", "gpt")
+    t.handle(evt("message.updated", { info: assistantMsg({ id: "m1", providerID: "openai" }) }))
+    t.handle(evt("message.part.updated", { part: stepFinish({ id: "sf1", messageID: "m1", cost: 0, tokens: { input: 10_000, output: 1_000, reasoning: 0, cache: { read: 40_000, write: 0 } } }) }))
+    t.finalizeAll()
+    const u = t.finished.at(-1)!.byProvider["openai"]
+    expect(u.cost).toBeCloseTo((10_000 * 0.5 + 1_000 * 2 + 40_000 * 0.05) / 1_000_000)
+  })
+
   test("setActiveSession accepts sessions not seen in this instance", () => {
     const t = new Telemetry(freshHistory())
     t.setActiveSession("ses_never_seen")

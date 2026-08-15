@@ -11,6 +11,7 @@ export const CONFIG_PATH = join(
 )
 
 export const STATE_DIR = join(CACHE_BASE, "prompt-left")
+export const GLOBAL_PRIOR_PATH = join(STATE_DIR, "global-prior.json")
 export const QUOTA_EXPORT_PATH = join(CACHE_BASE, "quota-export.json")
 export const QUOTA_STATE_DIR = join(CACHE_BASE, "quota-provider-state")
 
@@ -53,6 +54,8 @@ export interface PromptUsage {
   toolCalls: number
   toolOutputChars: number
 }
+
+export type CostFn = (provider: string, model: string | undefined, usage: PromptUsage) => number
 
 export function emptyUsage(): PromptUsage {
   return {
@@ -125,6 +128,20 @@ export interface HistoryState {
   lastContext?: number
   activeSession?: string
   externalShare: number
+  globalPriorCounted?: number
+}
+
+export interface GlobalPriorEntry {
+  cost: number
+  requests: number
+  tokens: number
+  n: number
+}
+
+export interface GlobalPrior {
+  version: 1
+  byRegime: Record<string, GlobalPriorEntry>
+  byProvider: Record<string, GlobalPriorEntry>
 }
 
 export function freshHistory(): HistoryState {

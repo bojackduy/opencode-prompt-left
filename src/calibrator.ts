@@ -1,6 +1,7 @@
 import type {
   ContextEstimate,
   EstimateFile,
+  GlobalPrior,
   PromptForecast,
   PromptUsage,
   QuotaSnapshot,
@@ -258,6 +259,32 @@ export interface EstimateInput {
   windowBudgets?: Record<string, number>
   windowLimits?: Record<string, number>
   windowTokenLimits?: Record<string, number>
+  globalPrior?: GlobalPrior
+}
+
+function forecastFromGlobal(global: GlobalPrior, selected: SelectedRegime): PromptForecast | null {
+  const modelKey = `${selected.provider ?? ""}|${selected.model ?? ""}`
+  const entry = global.byRegime[modelKey] ?? global.byProvider[selected.provider ?? ""]
+  if (!entry || entry.n <= 0 || entry.cost <= 0) return null
+  return {
+    sampleCount: Math.min(entry.n, 30),
+    fallbackLevel: 2,
+    cost: entry.cost,
+    requests: entry.requests,
+    input: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    output: 0,
+    reasoning: 0,
+    toolCalls: 0,
+    toolOutputTokens: 0,
+    childSessions: 0,
+    contextGrowth: 0,
+    compactionCost: entry.cost,
+    compactionRate: 0,
+    costCv: 0,
+    tokens: entry.tokens,
+  }
 }
 
 function planValue(map: Record<string, number> | undefined, e: QuotaSnapshot["entries"][number]): number | undefined {
@@ -312,22 +339,24 @@ function budgetOnlyEstimate(
 ): EstimateFile {
   const remaining = entry.percentRemaining ?? 0
   const remainingUSD = (budget * remaining) / 100
+  const prompts = Math.floor(remaining / PRIOR_BURN_SAFE)
   base.status = "ready"
-  base.compact = `${compactPrefix(base.selected)}$${remainingUSD.toFixed(2)} left · ${entry.window ?? entry.name}`
-  base.likely = null
-  base.safe = null
+  base.compact = `${compactPrefix(base.selected)}≈${Math.max(0, prompts)} prompts · ${entry.window ?? entry.name}`
+  base.likely = Math.floor(remaining / PRIOR_BURN_MEAN)
+  base.safe = Math.max(0, prompts)
   base.binding = {
     provider: entry.provider,
     window: entry.window ?? entry.name,
     remaining,
     burnPP: null,
     resetAt: entry.resetAt,
-    method: "budget",
+    method: "prior",
     budget,
     remainingUSD,
   }
   base.confidence = 0.3 * Math.max(0, 1 - base.calibration.quotaAgeSec / 1800)
   base.confidenceLabel = confidenceLabel(base.confidence)
+  base.calibration.usingPrior = true
   base.calibration.fallbackLevel = 3
   return base
 }
@@ -393,7 +422,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
 
   const quotaAgeSec = Math.max(0, (now - quota.at) / 1000)
   const selectedProviderEntries = quota.entries.filter((e) => e.provider === selected.provider)
-  const forecast = buildForecast(input.prompts, selected)
+  const forecast = buildForecast(input.prompts, selected) ?? (input.globalPrior ? forecastFromGlobal(input.globalPrior, selected) : null)
   base.forecast = forecast
 
   if (forecast) {

@@ -269,7 +269,7 @@ describe("computeEstimate", () => {
     expect(est.likely).toBe(42)
   })
 
-  test("cold start with a budget shows remaining dollars instead of a fake count", () => {
+  test("cold start with a budget still shows a prompt count via the prior", () => {
     const est = computeEstimate({
       now: 1_000_010,
       quota,
@@ -282,10 +282,39 @@ describe("computeEstimate", () => {
       windowBudgets: { "5h": 12, Weekly: 30, Monthly: 60 },
     })
     expect(est.status).toBe("ready")
+    expect(est.calibration.usingPrior).toBe(true)
+    expect(est.likely).toBe(Math.floor(7 / 1.5))
+    expect(est.safe).toBe(Math.floor(7 / 2.5))
+    expect(est.binding?.method).toBe("prior")
+    expect(est.binding?.budget).toBe(30)
+    expect(est.binding?.remainingUSD).toBeCloseTo(2.1)
+    expect(est.compact).toBe(`opencode-go/m ≈${Math.floor(7 / 2.5)} prompts · Weekly`)
+  })
+
+  test("global prior fills the cold start so budget converts to real prompts", () => {
+    const globalPrior = {
+      version: 1 as const,
+      byRegime: { "opencode-go|m": { cost: 0.05, requests: 3, tokens: 250_000, n: 40 } },
+      byProvider: {},
+    }
+    const est = computeEstimate({
+      now: 1_000_010,
+      quota,
+      prompts: [],
+      windows: {},
+      selected: { provider: "opencode-go", model: "m", agent: "build" },
+      contextNow: null,
+      usableContext: null,
+      externalShare: 0,
+      windowBudgets: { "5h": 12, Weekly: 30, Monthly: 60 },
+      globalPrior,
+    })
+    // Weekly: $30 × 7% = $2.10 → 2.10 / 0.05 = 42 prompts
+    expect(est.status).toBe("ready")
     expect(est.calibration.usingPrior).toBe(false)
-    expect(est.likely).toBeNull()
     expect(est.binding?.method).toBe("budget")
-    expect(est.compact).toBe("opencode-go/m $2.10 left · Weekly")
+    expect(est.likely).toBe(42)
+    expect(est.compact).toBe(`opencode-go/m ≈42 prompts · Weekly`)
   })
 
   test("request-limit estimate converts remaining percent via requests per prompt", () => {

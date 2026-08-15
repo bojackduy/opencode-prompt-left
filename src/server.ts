@@ -8,13 +8,17 @@ import { loadPlans, type Plans } from "./budget"
 import { computeEstimate, type EstimateInput } from "./calibrator"
 import {
   CONFIG_PATH,
+  GLOBAL_PRIOR_PATH,
   freshHistory,
   readJson,
   statePaths,
   workspaceKey,
   writeJsonAtomic,
   type ActiveFile,
+  type CostFn,
   type EstimateFile,
+  type GlobalPrior,
+  type GlobalPriorEntry,
   type HistoryState,
   type TuiSelection,
   type WindowTracker,
@@ -53,12 +57,26 @@ const paths = statePaths(KEY)
 const plugin: Plugin = async ({ client }, _options) => {
   const raw = readJson<HistoryState>(paths.history)
   const history: HistoryState = raw?.version === 2 ? raw : freshHistory()
-  const telemetry = new Telemetry(history)
+  const modelCatalog = new Map<string, ModelInfo>()
+  const costFn: CostFn = (provider, model, usage) => {
+    if (!model) return 0
+    const c = modelCatalog.get(modelKey(provider, model))?.cost
+    if (!c) return 0
+    return (
+      (usage.input * (c.input ?? 0) +
+        (usage.output + usage.reasoning) * (c.output ?? 0) +
+        usage.cacheRead * (c.cacheRead ?? 0) +
+        usage.cacheWrite * (c.cacheWrite ?? 0)) /
+      1_000_000
+    )
+  }
+  const telemetry = new Telemetry(history, costFn)
   if (history.activeSession) telemetry.setActiveSession(history.activeSession)
 
-  const modelCatalog = new Map<string, ModelInfo>()
   let plans: Plans = loadPlans()
   let quota = readQuotaSnapshot()
+  let globalPrior: GlobalPrior =
+    readJson<GlobalPrior>(GLOBAL_PRIOR_PATH) ?? { version: 1, byRegime: {}, byProvider: {} }
   let lastSnapAt = 0
   let pollTimer: ReturnType<typeof setInterval> | undefined
   let bridgePollTimer: ReturnType<typeof setInterval> | undefined
@@ -193,11 +211,41 @@ const plugin: Plugin = async ({ client }, _options) => {
     recompute()
   }
 
+  function mergePriorEntry(entry: GlobalPriorEntry | undefined, cost: number, requests: number, tokens: number): GlobalPriorEntry {
+    const n = Math.min((entry?.n ?? 0) + 1, 200)
+    const alpha = 1 / n
+    return {
+      cost: entry ? entry.cost * (1 - alpha) + cost * alpha : cost,
+      requests: entry ? entry.requests * (1 - alpha) + requests * alpha : requests,
+      tokens: entry ? entry.tokens * (1 - alpha) + tokens * alpha : tokens,
+      n,
+    }
+  }
+
+  function updateGlobalPrior() {
+    const counted = history.globalPriorCounted ?? 0
+    const prompts = telemetry.finished
+    if (prompts.length <= counted) return
+    for (let i = counted; i < prompts.length; i++) {
+      const p = prompts[i]
+      for (const [provider, u] of Object.entries(p.byProvider)) {
+        if (!provider || u.cost <= 0) continue
+        const tokens = u.input + u.cacheRead + u.cacheWrite + u.output + u.reasoning
+        globalPrior.byProvider[provider] = mergePriorEntry(globalPrior.byProvider[provider], u.cost, u.requests, tokens)
+        const modelKey = `${provider}|${p.model ?? ""}`
+        globalPrior.byRegime[modelKey] = mergePriorEntry(globalPrior.byRegime[modelKey], u.cost, u.requests, tokens)
+      }
+    }
+    history.globalPriorCounted = prompts.length
+    writeJsonAtomic(GLOBAL_PRIOR_PATH, globalPrior)
+  }
+
   function saveHistory() {
     history.prompts = telemetry.finished
     history.lastSelected = telemetry.lastSelected
     history.lastContext = telemetry.contextNow() ?? history.lastContext
     history.activeSession = telemetry.activeRoot
+    updateGlobalPrior()
     writeJsonAtomic(paths.history, history)
   }
 
@@ -267,6 +315,7 @@ const plugin: Plugin = async ({ client }, _options) => {
       windowBudgets: selected.provider ? plans.budgets[selected.provider] : undefined,
       windowLimits: selected.provider ? plans.limits[selected.provider] : undefined,
       windowTokenLimits: selected.provider ? plans.tokenLimits[selected.provider] : undefined,
+      globalPrior,
     }
     const estimate: EstimateFile = computeEstimate(input)
     writeJsonAtomic(paths.estimate, estimate)

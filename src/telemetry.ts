@@ -1,5 +1,5 @@
 import type { Event, Message, Part } from "@opencode-ai/sdk"
-import type { HistoryState, PromptUsage, RootPrompt, SelectedRegime } from "./shared"
+import type { CostFn, HistoryState, PromptUsage, RootPrompt, SelectedRegime } from "./shared"
 import { emptyUsage } from "./shared"
 
 const MAX_PROMPTS = 200
@@ -23,15 +23,17 @@ export class Telemetry {
   private lastContext = new Map<string, number>()
   private promptSeq = 0
   private selSeq = 0
+  private costFn?: CostFn
 
   finished: RootPrompt[] = []
   lastSelected?: SelectedRegime
   latestRoot?: string
   activeRoot?: string
 
-  constructor(history: HistoryState) {
+  constructor(history: HistoryState, costFn?: CostFn) {
     this.finished = history.prompts ?? []
     this.lastSelected = history.lastSelected
+    this.costFn = costFn
   }
 
   handle(e: Event): void {
@@ -295,6 +297,15 @@ export class Telemetry {
     if (!prompt) return
     prompt.finishedAt = Date.now()
     prompt.contextAfter = this.lastContext.get(root)
+    if (this.costFn) {
+      for (const [provider, u] of Object.entries(prompt.byProvider)) {
+        if (u.cost > 0) continue
+        const tokens = u.input + u.cacheRead + u.cacheWrite + u.output + u.reasoning
+        if (tokens <= 0) continue
+        const cost = this.costFn(provider, prompt.model, u)
+        if (cost > 0) u.cost = cost
+      }
+    }
     this.finished.push(prompt)
     if (this.finished.length > MAX_PROMPTS) this.finished = this.finished.slice(-MAX_PROMPTS)
     this.activeByRoot.delete(root)

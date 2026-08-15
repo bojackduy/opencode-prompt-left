@@ -78,7 +78,7 @@ binds over 5h).
 |---|---|
 | `opencode-go/deepseek-v4-flash ≈54 prompts · Weekly` | plan-budget estimate (real per-prompt cost ÷ remaining dollars), green/yellow/red by capacity |
 | `copilot/gpt-5.6 ≈0 prompts · Copilot` | plan-limit estimate (remaining requests ÷ requests per prompt) |
-| `opencode-go/deepseek-v4-flash $1.20 left · Weekly` | budget known but no usage history yet — exact dollars, count appears after a few prompts |
+| `opencode-go/deepseek-v4-flash ≈40 prompts · Weekly` (low confidence) | cold start — no local usage yet; prompts come from a **global prior** (pooled per-prompt cost across all your workspaces) or the pp/prompt prior |
 | `no quota · claude-code-ollama` | provider is not tracked by opencode-quota (free model, local provider, or not enabled) |
 | `≈2 prompts · Weekly` (low confidence) | prior estimate — no plan limit and no observations |
 | `no quota` | no usable quota export found |
@@ -155,6 +155,13 @@ The workspace hash is derived from the project directory, so:
 - Running several directories **at the same time** never races on shared files — no cross-talk, no flicker.
 - Each directory calibrates its own workload and quota rates (cold-starts per directory; that's the price of accuracy).
 - Sessions with different models inside one directory each keep their own selection, and the estimate follows whichever one you have open.
+
+The one shared file is `global-prior.json` at the prompt-left root: a small,
+n-weighted pool of per-prompt cost/requests/tokens per provider+model, merged
+from every workspace. It is used **only as a cold-start prior** when a
+directory has no usage samples yet — calibration itself stays per-directory.
+This is what lets a brand-new directory show a realistic prompt count
+immediately instead of a budget or percentage.
 
 ## Coexisting with opencode-quota
 
@@ -250,8 +257,7 @@ provenance.
 
 ## Notes and limitations
 
-- Estimates are statistical. "≈N similar prompts" means *if you keep prompting like your recent root prompts do, in the current context state*.
-- Quota-rate calibration needs at least one observable percentage change on the selected provider's windows; until then the compact line shows the remaining percentage and the forecast cost.
+- Estimates are statistical. "≈N similar prompts" means *if you keep prompting like your recent root prompts do, in the current context state*. The compact line **always shows a prompt count** — budget/rate/prior are internal details shown in the detail view.
 - Quota observations arrive at opencode-quota's refresh interval (~5 min), so rate observations are per interval, not per prompt.
 - Quota used by other machines/windows is detected as external burn and lowers confidence.
 - A window can reset before you exhaust it at your pace; the detail view shows reset countdowns.
