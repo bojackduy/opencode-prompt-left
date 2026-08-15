@@ -357,6 +357,35 @@ describe("computeEstimate", () => {
     expect(est.binding?.method).toBe("budget")
   })
 
+  test("copilot credits window converts via per-prompt cost like a budget", () => {
+    const prompts = [
+      prompt({ finishedAt: 1, provider: "copilot", model: "gpt", agent: "b", byProvider: { copilot: usage({ cost: 0.01, requests: 3 }) } }),
+      prompt({ finishedAt: 2, provider: "copilot", model: "gpt", agent: "b", byProvider: { copilot: usage({ cost: 0.01, requests: 3 }) } }),
+    ]
+    const est = computeEstimate({
+      now: 1_000_010,
+      quota: { at: 1_000_000, fromExport: true, entries: [
+        { provider: "copilot", name: "Copilot", percentRemaining: 100 },
+        { provider: "copilot", name: "Copilot Premium Interactions", percentRemaining: 100 },
+      ] },
+      prompts,
+      windows: {},
+      selected: { provider: "copilot", model: "gpt", agent: "b" },
+      contextNow: null,
+      usableContext: null,
+      externalShare: 0,
+      windowBudgets: { Copilot: 15 },
+      windowLimits: { "Copilot Premium Interactions": 300 },
+    })
+    // Copilot window: $15 × 100% = $15 → 15 / 0.01 = 1500 prompts
+    // Premium Interactions: 300 × 100% = 300 → 300 / 3 = 100 prompts (binds)
+    expect(est.binding?.method).toBe("limit")
+    expect(est.binding?.window).toBe("Copilot Premium Interactions")
+    expect(est.likely).toBe(100)
+    const copilotWindow = est.perProvider.find((p) => p.provider === "copilot")!.windows.find((w) => w.window === "Copilot")!
+    expect(copilotWindow.prompts).toBe(1500)
+  })
+
   test("untracked provider shows no-quota instead of calibrating", () => {
     const est = computeEstimate({
       now: 1_000_010,

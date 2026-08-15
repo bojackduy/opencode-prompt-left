@@ -10,6 +10,40 @@ Estimates how many **similar prompts** remain before your provider quota runs ou
 
 The number is a forward forecast of your own usage: recent per-prompt workload (cost, requests, tokens in/out, cache read/write, tool calls, subagents), projected against the current context/compaction state, then converted to quota burn using the observed percentage-per-dollar rate of each quota window.
 
+## Install
+
+Install from npm (published as `@bojackduy/opencode-prompt-left`). The same
+package provides both the server plugin and the TUI plugin — opencode resolves
+the right entrypoint (`./server` / `./tui`) from the config file it appears in:
+
+```jsonc
+// opencode.jsonc
+{
+  "plugin": ["@bojackduy/opencode-prompt-left"]
+}
+```
+
+```jsonc
+// tui.json
+{
+  "plugin": ["@bojackduy/opencode-prompt-left"]
+}
+```
+
+> To use a local clone instead (development):
+>
+> ```jsonc
+> // opencode.jsonc
+> { "plugin": ["/path/to/opencode-prompt-left/src/server.ts"] }
+> // tui.json
+> { "plugin": ["/path/to/opencode-prompt-left/src/tui.tsx"] }
+> ```
+
+Restart OpenCode. State persists per project directory at `$XDG_CACHE_HOME/opencode/prompt-left/<workspace-hash>/`:
+
+- `history.json` — root-prompt usage telemetry and per-window quota-rate observations (survives restarts)
+- `estimate.json` — the current estimate, consumed by the TUI
+
 ## Core formula
 
 ```
@@ -139,48 +173,6 @@ Either way both plugins stay fully enabled.
 
 ## Requirements
 
-- [opencode-quota](https://github.com/slkiser/opencode-quota) installed and refreshing (TUI compact/sidebar or toasts enabled).
-- Quota source (either works):
-  - `opencode-quota` export file: set `export.enabled: true` in `opencode-quota/quota-toast.json`, or
-  - the provider cache at `$XDG_CACHE_HOME/opencode/quota-provider-state/*.json` (read automatically, no config needed).
-
-## Install
-
-Install from npm (published as `opencode-prompt-left`). The same package
-provides both the server plugin and the TUI plugin — opencode resolves the
-right entrypoint (`./server` / `./tui`) from the config file it appears in:
-
-```jsonc
-// opencode.jsonc
-{
-  "plugin": ["opencode-prompt-left"]
-}
-```
-
-```jsonc
-// tui.json
-{
-  "plugin": ["opencode-prompt-left"]
-}
-```
-
-> To use a local clone instead (development):
->
-> ```jsonc
-> // opencode.jsonc
-> { "plugin": ["/path/to/opencode-prompt-left/src/server.ts"] }
-> // tui.json
-> { "plugin": ["/path/to/opencode-prompt-left/src/tui.tsx"] }
-> ```
-
-(The npm entry requires `opencode-prompt-left` to be published — see
-[Releasing](#releasing) for the initial manual publish.)
-
-Restart OpenCode. State persists per project directory at `$XDG_CACHE_HOME/opencode/prompt-left/<workspace-hash>/`:
-
-- `history.json` — root-prompt usage telemetry and per-window quota-rate observations (survives restarts)
-- `estimate.json` — the current estimate, consumed by the TUI
-
 ## Plan limits
 
 `~/.config/opencode/prompt-left.json` lets you give any provider an exact
@@ -189,8 +181,8 @@ supported; the estimator uses the first that applies per window:
 
 | Kind | Field | Converts via | Defaults (built in) |
 |---|---|---|---|
-| Dollar budget | `budgets` | per-prompt **cost** | `opencode-go`: $12/5h, $30/week, $60/month |
-| Request limit | `limits` | per-prompt **requests** | `copilot`: 300 premium interactions/month (Pro) |
+| Dollar budget | `budgets` | per-prompt **cost** | `opencode-go`: $12/5h, $30/week, $60/month · `copilot`: $15/month (1,500 AI credits @ $0.01, Pro) |
+| Request limit | `limits` | per-prompt **requests** | `copilot` "Copilot Premium Interactions": 300/month (Pro) |
 | Token allowance | `tokenLimits` | per-prompt **tokens** | — |
 
 ```jsonc
@@ -213,10 +205,23 @@ Window keys match the quota provider's labels (`5h`, `Weekly`, `Monthly`,
 limit, a provider falls back to observed quota-per-dollar rates, then to a
 prior placeholder. The file is watched — edits apply on the next recompute.
 
-Plan values for other providers are config-driven because they depend on your
-plan tier (and aren't exposed by the quota APIs — opencode-quota itself only
-sees percentages; the OpenCode Go numbers come from the public usage-limits
-docs).
+Built-in defaults and their sources:
+
+- `opencode-go` — official usage-limits docs: $12 / 5h, $30 / week, $60 / month.
+- `copilot` "Copilot" — GitHub AI Credits (1 credit = $0.01); Copilot Pro
+  includes 1,500 credits/month (1,000 base + 500 flex) = $15/month
+  ([usage-based billing](https://docs.github.com/en/copilot/concepts/billing/usage-based-billing-for-individuals)).
+  The quota plugin's percentage refers to these credits, so it converts via
+  per-prompt cost (credits are dollars).
+- `copilot` "Copilot Premium Interactions" — legacy premium-request allowance,
+  300/month on Pro.
+
+OpenAI (ChatGPT Pro weekly) and Ollama Cloud are **config-driven by design**:
+their absolute limits are not published (ChatGPT Pro allowances differ by tier
+and model; Ollama Cloud bills model-weighted "usage units", explicitly *not* a
+fixed token count). Fabricating defaults would look reliable but be wrong — so
+they fall back to rate observations, then a prior, until you add their values
+to `prompt-left.json`.
 
 ## Development
 
