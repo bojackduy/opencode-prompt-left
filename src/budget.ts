@@ -1,4 +1,5 @@
 import { CONFIG_PATH, readJson } from "./shared"
+import type { PricingConfig, PricingOverride } from "./shared"
 
 // Built-in plan defaults. Sources:
 // - opencode-go: official usage-limits docs ($12 / 5h, $30 / week, $60 / month)
@@ -27,6 +28,7 @@ export interface Plans {
   budgets: Record<string, Record<string, number>>
   limits: Record<string, Record<string, number>>
   tokenLimits: Record<string, Record<string, number>>
+  pricingOverrides: Record<string, Record<string, PricingOverride>>
 }
 
 function merge(defaults: Record<string, Record<string, number>>, overrides?: Record<string, Record<string, number>>) {
@@ -41,11 +43,12 @@ function merge(defaults: Record<string, Record<string, number>>, overrides?: Rec
 }
 
 export function loadPlans(path = CONFIG_PATH): Plans {
-  const cfg = readJson<PlansConfig>(path)
+  const cfg = readJson<PricingConfig>(path)
   return {
     budgets: merge(DEFAULT_BUDGETS, cfg?.budgets),
     limits: merge(DEFAULT_LIMITS, cfg?.limits),
     tokenLimits: merge({}, cfg?.tokenLimits),
+    pricingOverrides: cfg?.pricingOverrides ?? {},
   }
 }
 

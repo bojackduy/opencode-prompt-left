@@ -20,6 +20,7 @@ import {
   type GlobalPrior,
   type GlobalPriorEntry,
   type HistoryState,
+  type PricingOverride,
   type TuiSelection,
   type WindowTracker,
 } from "./shared"
@@ -159,29 +160,50 @@ const plugin: Plugin = async ({ client }, _options) => {
     }
   }
 
-  async function refreshCatalog() {
-    try {
-      const resp = await client.provider.list()
-      const all = Array.isArray(resp.data?.all) ? resp.data.all : []
-      for (const provider of all) {
-        for (const [mid, m] of Object.entries(provider.models ?? {})) {
-          const key = modelKey(provider.id, mid)
-          modelCatalog.set(key, {
-            name: m.name,
-            context: m.limit?.context,
-            output: m.limit?.output,
-            cost: {
-              input: m.cost?.input,
-              output: m.cost?.output,
-              cacheRead: m.cost?.cache_read,
-              cacheWrite: m.cost?.cache_write,
-            },
-          })
-        }
+  function applyPricingOverrides(overrides: Record<string, Record<string, PricingOverride>>) {
+    for (const [provider, models] of Object.entries(overrides)) {
+      for (const [modelId, override] of Object.entries(models)) {
+        const key = modelKey(provider, modelId)
+        const existing = modelCatalog.get(key) ?? {}
+        modelCatalog.set(key, {
+          ...existing,
+          cost: {
+            input: override.input ?? existing.cost?.input,
+            output: override.output ?? existing.cost?.output,
+            cacheRead: override.cacheRead ?? existing.cost?.cacheRead,
+            cacheWrite: override.cacheWrite ?? existing.cost?.cacheWrite,
+          },
+        })
       }
-    } catch (err) {
-      log(`provider catalog failed: ${String(err)}`)
     }
+  }
+
+  function refreshCatalog() {
+    return (async () => {
+      try {
+        const resp = await client.provider.list()
+        const all = Array.isArray(resp.data?.all) ? resp.data.all : []
+        for (const provider of all) {
+          for (const [mid, m] of Object.entries(provider.models ?? {})) {
+            const key = modelKey(provider.id, mid)
+            modelCatalog.set(key, {
+              name: m.name,
+              context: m.limit?.context,
+              output: m.limit?.output,
+              cost: {
+                input: m.cost?.input,
+                output: m.cost?.output,
+                cacheRead: m.cost?.cache_read,
+                cacheWrite: m.cost?.cache_write,
+              },
+            })
+          }
+        }
+      } catch (err) {
+        log(`provider catalog failed: ${String(err)}`)
+      }
+      applyPricingOverrides(plans.pricingOverrides)
+    })()
   }
 
   async function init() {
@@ -363,6 +385,7 @@ const plugin: Plugin = async ({ client }, _options) => {
         if (stat.mtimeMs === lastMtime) return
         lastMtime = stat.mtimeMs
         plans = loadPlans()
+        applyPricingOverrides(plans.pricingOverrides)
         recompute()
       } catch {
         lastMtime = 0

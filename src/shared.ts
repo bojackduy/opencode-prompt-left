@@ -57,6 +57,20 @@ export interface PromptUsage {
 
 export type CostFn = (provider: string, model: string | undefined, usage: PromptUsage) => number
 
+export interface PricingOverride {
+  input?: number
+  output?: number
+  cacheRead?: number
+  cacheWrite?: number
+}
+
+export interface PricingConfig {
+  budgets?: Record<string, Record<string, number>>
+  limits?: Record<string, Record<string, number>>
+  tokenLimits?: Record<string, Record<string, number>>
+  pricingOverrides?: Record<string, Record<string, PricingOverride>>
+}
+
 export function emptyUsage(): PromptUsage {
   return {
     requests: 0,

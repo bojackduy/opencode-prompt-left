@@ -218,6 +218,13 @@ supported; the estimator uses the first that applies per window:
   },
   "tokenLimits": {
     "ollama-cloud": { "Weekly": 1000000 } // from your ollama.com plan page
+  },
+  "pricingOverrides": {
+    "opencode-go": {
+      "deepseek-v4-flash":  { "input": 0.14, "output": 0.28, "cacheRead": 0.0028 },
+      "deepseek-v4-pro":    { "input": 0.435, "output": 0.87, "cacheRead": 0.003625 },
+      "mimo-v2.5":          { "input": 0.14, "output": 0.28, "cacheRead": 0.0028 }
+    }
   }
 }
 ```
@@ -225,7 +232,8 @@ supported; the estimator uses the first that applies per window:
 Window keys match the quota provider's labels (`5h`, `Weekly`, `Monthly`,
 `Session`, …); the entry name is also matched as a fallback. Without a plan
 limit, a provider falls back to observed quota-per-dollar rates, then to a
-prior placeholder. The file is watched — edits apply on the next recompute.
+prior placeholder. The file is watched — edits apply on the next recompute (pricing overrides
+take effect instantly without restarting).
 
 Built-in defaults and their sources:
 
