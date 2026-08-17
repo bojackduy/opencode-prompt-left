@@ -75,9 +75,12 @@ const plugin: Plugin = async ({ client }, _options) => {
 
   let plans: Plans = loadPlans()
   let quota = readQuotaSnapshot()
+  const rawPrior = readJson<GlobalPrior>(GLOBAL_PRIOR_PATH)
   let globalPrior: GlobalPrior =
-    readJson<GlobalPrior>(GLOBAL_PRIOR_PATH) ?? { version: 1, byRegime: {}, byProvider: {} }
+    rawPrior?.version === 2 ? rawPrior : { version: 2, byRegime: {}, byProvider: {} }
   let lastSnapAt = 0
+  let lastCatalogAt = 0
+  const CATALOG_REFRESH_INTERVAL_MS = 300_000
   let pollTimer: ReturnType<typeof setInterval> | undefined
   let bridgePollTimer: ReturnType<typeof setInterval> | undefined
   let recomputeTimer: ReturnType<typeof setTimeout> | undefined
@@ -156,14 +159,7 @@ const plugin: Plugin = async ({ client }, _options) => {
     }
   }
 
-  async function init() {
-    try {
-      const sessions = await client.session.list()
-      const rows = Array.isArray(sessions.data) ? sessions.data : []
-      telemetry.hydrate(rows, history.lastContext)
-    } catch (err) {
-      log(`session hydrate failed: ${String(err)}`)
-    }
+  async function refreshCatalog() {
     try {
       const resp = await client.provider.list()
       const all = Array.isArray(resp.data?.all) ? resp.data.all : []
@@ -186,6 +182,17 @@ const plugin: Plugin = async ({ client }, _options) => {
     } catch (err) {
       log(`provider catalog failed: ${String(err)}`)
     }
+  }
+
+  async function init() {
+    try {
+      const sessions = await client.session.list()
+      const rows = Array.isArray(sessions.data) ? sessions.data : []
+      telemetry.hydrate(rows, history.lastContext)
+    } catch (err) {
+      log(`session hydrate failed: ${String(err)}`)
+    }
+    await refreshCatalog()
     try {
       const cfg = await client.config.get()
       const providers = (cfg.data?.provider ?? {}) as Record<
@@ -211,13 +218,26 @@ const plugin: Plugin = async ({ client }, _options) => {
     recompute()
   }
 
-  function mergePriorEntry(entry: GlobalPriorEntry | undefined, cost: number, requests: number, tokens: number): GlobalPriorEntry {
+  function mergePriorEntry(
+    entry: GlobalPriorEntry | undefined,
+    cost: number,
+    requests: number,
+    tokens: number,
+    input: number,
+    cacheRead: number,
+    output: number,
+    reasoning: number,
+  ): GlobalPriorEntry {
     const n = Math.min((entry?.n ?? 0) + 1, 200)
     const alpha = 1 / n
     return {
       cost: entry ? entry.cost * (1 - alpha) + cost * alpha : cost,
       requests: entry ? entry.requests * (1 - alpha) + requests * alpha : requests,
       tokens: entry ? entry.tokens * (1 - alpha) + tokens * alpha : tokens,
+      input: entry ? entry.input * (1 - alpha) + input * alpha : input,
+      cacheRead: entry ? entry.cacheRead * (1 - alpha) + cacheRead * alpha : cacheRead,
+      output: entry ? entry.output * (1 - alpha) + output * alpha : output,
+      reasoning: entry ? entry.reasoning * (1 - alpha) + reasoning * alpha : reasoning,
       n,
     }
   }
@@ -231,9 +251,15 @@ const plugin: Plugin = async ({ client }, _options) => {
       for (const [provider, u] of Object.entries(p.byProvider)) {
         if (!provider || u.cost <= 0) continue
         const tokens = u.input + u.cacheRead + u.cacheWrite + u.output + u.reasoning
-        globalPrior.byProvider[provider] = mergePriorEntry(globalPrior.byProvider[provider], u.cost, u.requests, tokens)
+        globalPrior.byProvider[provider] = mergePriorEntry(
+          globalPrior.byProvider[provider], u.cost, u.requests, tokens,
+          u.input, u.cacheRead, u.output + u.reasoning, 0,
+        )
         const modelKey = `${provider}|${p.model ?? ""}`
-        globalPrior.byRegime[modelKey] = mergePriorEntry(globalPrior.byRegime[modelKey], u.cost, u.requests, tokens)
+        globalPrior.byRegime[modelKey] = mergePriorEntry(
+          globalPrior.byRegime[modelKey], u.cost, u.requests, tokens,
+          u.input, u.cacheRead, u.output + u.reasoning, 0,
+        )
       }
     }
     history.globalPriorCounted = prompts.length
@@ -250,11 +276,15 @@ const plugin: Plugin = async ({ client }, _options) => {
   }
 
   function refreshQuota() {
+    const now = Date.now()
+    if (now - lastCatalogAt > CATALOG_REFRESH_INTERVAL_MS) {
+      lastCatalogAt = now
+      refreshCatalog()
+    }
     const snap = readQuotaSnapshot()
     if (!snap || snap.at <= lastSnapAt) return
     lastSnapAt = snap.at
     quota = snap
-    const now = Date.now()
     for (const e of snap.entries) {
       if (typeof e.percentRemaining !== "number") continue
       const key = `${e.provider}::${e.name}`
@@ -316,6 +346,10 @@ const plugin: Plugin = async ({ client }, _options) => {
       windowLimits: selected.provider ? plans.limits[selected.provider] : undefined,
       windowTokenLimits: selected.provider ? plans.tokenLimits[selected.provider] : undefined,
       globalPrior,
+      modelPricing: (provider, model) => {
+        const c = modelCatalog.get(modelKey(provider, model))?.cost
+        return c ? { input: c.input ?? 0, output: c.output ?? 0, cacheRead: c.cacheRead ?? 0, cacheWrite: c.cacheWrite ?? 0 } : null
+      },
     }
     const estimate: EstimateFile = computeEstimate(input)
     writeJsonAtomic(paths.estimate, estimate)

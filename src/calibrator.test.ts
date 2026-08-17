@@ -291,10 +291,40 @@ describe("computeEstimate", () => {
     expect(est.compact).toBe(`opencode-go/m ≈${Math.floor(7 / 2.5)} prompts · Weekly`)
   })
 
+  test("global prior uses model pricing for a new model not yet used locally", () => {
+    const globalPrior = {
+      version: 2 as const,
+      byRegime: {},
+      byProvider: { "opencode-go": { cost: 0.022, requests: 14, tokens: 6_000_000, input: 80_000, cacheRead: 5_500_000, output: 2_000, reasoning: 1_000, n: 40 } },
+    }
+    const pricing = (_p: string, m: string) => {
+      if (m === "mimo-v2.5") return { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 }
+      return null
+    }
+    const est = computeEstimate({
+      now: 1_000_010,
+      quota,
+      prompts: [],
+      windows: {},
+      selected: { provider: "opencode-go", model: "mimo-v2.5", agent: "build" },
+      contextNow: null,
+      usableContext: null,
+      externalShare: 0,
+      windowBudgets: { "5h": 12, Weekly: 30, Monthly: 60 },
+      globalPrior,
+      modelPricing: pricing,
+    })
+    // cost = (80k×0.14 + 5500k×0.0028 + 2k×0.28 + 1k×0.28)/1e6 = (11200+15400+560+280)/1e6 ≈ $0.0274
+    // 5h: 12 × 100% / 0.0274 ≈ 437 prompts
+    expect(est.status).toBe("ready")
+    expect(est.binding?.method).toBe("budget")
+    expect(est.likely).toBeGreaterThan(100)
+  })
+
   test("global prior fills the cold start so budget converts to real prompts", () => {
     const globalPrior = {
-      version: 1 as const,
-      byRegime: { "opencode-go|m": { cost: 0.05, requests: 3, tokens: 250_000, n: 40 } },
+      version: 2 as const,
+      byRegime: { "opencode-go|m": { cost: 0.05, requests: 3, tokens: 250_000, input: 50_000, cacheRead: 200_000, output: 2_000, reasoning: 1_000, n: 40 } },
       byProvider: {},
     }
     const est = computeEstimate({

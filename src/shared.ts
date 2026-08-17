@@ -135,11 +135,15 @@ export interface GlobalPriorEntry {
   cost: number
   requests: number
   tokens: number
+  input: number
+  cacheRead: number
+  output: number
+  reasoning: number
   n: number
 }
 
 export interface GlobalPrior {
-  version: 1
+  version: 2
   byRegime: Record<string, GlobalPriorEntry>
   byProvider: Record<string, GlobalPriorEntry>
 }

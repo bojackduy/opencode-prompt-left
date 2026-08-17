@@ -2,6 +2,7 @@ import type {
   ContextEstimate,
   EstimateFile,
   GlobalPrior,
+  GlobalPriorEntry,
   PromptForecast,
   PromptUsage,
   QuotaSnapshot,
@@ -260,31 +261,96 @@ export interface EstimateInput {
   windowLimits?: Record<string, number>
   windowTokenLimits?: Record<string, number>
   globalPrior?: GlobalPrior
+  modelPricing?: (provider: string, model: string) => { input: number; output: number; cacheRead: number; cacheWrite: number } | null
 }
 
-function forecastFromGlobal(global: GlobalPrior, selected: SelectedRegime): PromptForecast | null {
+function forecastFromGlobal(
+  global: GlobalPrior,
+  selected: SelectedRegime,
+  modelPricing?: (provider: string, model: string) => { input: number; output: number; cacheRead: number; cacheWrite: number } | null,
+): PromptForecast | null {
   const modelKey = `${selected.provider ?? ""}|${selected.model ?? ""}`
-  const entry = global.byRegime[modelKey] ?? global.byProvider[selected.provider ?? ""]
-  if (!entry || entry.n <= 0 || entry.cost <= 0) return null
-  return {
-    sampleCount: Math.min(entry.n, 30),
-    fallbackLevel: 2,
-    cost: entry.cost,
-    requests: entry.requests,
-    input: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    output: 0,
-    reasoning: 0,
-    toolCalls: 0,
-    toolOutputTokens: 0,
-    childSessions: 0,
-    contextGrowth: 0,
-    compactionCost: entry.cost,
-    compactionRate: 0,
-    costCv: 0,
-    tokens: entry.tokens,
+  const exact = global.byRegime[modelKey]
+  if (exact && exact.n > 0 && exact.cost > 0) {
+    return {
+      sampleCount: Math.min(exact.n, 30),
+      fallbackLevel: 2,
+      cost: exact.cost,
+      requests: exact.requests,
+      input: exact.input,
+      cacheRead: exact.cacheRead,
+      cacheWrite: 0,
+      output: exact.output,
+      reasoning: exact.reasoning,
+      toolCalls: 0,
+      toolOutputTokens: 0,
+      childSessions: 0,
+      contextGrowth: 0,
+      compactionCost: exact.cost,
+      compactionRate: 0,
+      costCv: 0,
+      tokens: exact.tokens,
+    }
   }
+  const providerEntry = global.byProvider[selected.provider ?? ""]
+  if (providerEntry && providerEntry.n > 0 && providerEntry.requests > 0) {
+    if (modelPricing && selected.model) {
+      const price = modelPricing(selected.provider ?? "", selected.model)
+      if (price) {
+        const avgInput = providerEntry.input / providerEntry.requests
+        const avgOutput = providerEntry.output / providerEntry.requests
+        const avgCacheRead = providerEntry.cacheRead / providerEntry.requests
+        const avgReasoning = providerEntry.reasoning / providerEntry.requests
+        const cost = (
+          avgInput * (price.input ?? 0) +
+          avgOutput * (price.output ?? 0) +
+          avgReasoning * (price.output ?? 0) +
+          avgCacheRead * (price.cacheRead ?? 0)
+        ) / 1_000_000
+        if (cost > 0) {
+          return {
+            sampleCount: Math.min(providerEntry.n, 30),
+            fallbackLevel: 1,
+            cost,
+            requests: providerEntry.requests,
+            input: avgInput,
+            cacheRead: avgCacheRead,
+            cacheWrite: 0,
+            output: avgOutput,
+            reasoning: avgReasoning,
+            toolCalls: 0,
+            toolOutputTokens: 0,
+            childSessions: 0,
+            contextGrowth: 0,
+            compactionCost: cost,
+            compactionRate: 0,
+            costCv: 0,
+            tokens: providerEntry.requests > 0 ? Math.round(avgInput + avgCacheRead + avgOutput + avgReasoning) : 0,
+          }
+        }
+      }
+    }
+    return {
+      sampleCount: Math.min(providerEntry.n, 30),
+      fallbackLevel: 2,
+      cost: providerEntry.cost,
+      requests: providerEntry.requests,
+      input: providerEntry.input,
+      cacheRead: providerEntry.cacheRead,
+      cacheWrite: 0,
+      output: providerEntry.output,
+      reasoning: providerEntry.reasoning,
+      toolCalls: 0,
+      toolOutputTokens: 0,
+      childSessions: 0,
+      contextGrowth: 0,
+      compactionCost: providerEntry.cost,
+      compactionRate: 0,
+      costCv: 0,
+      tokens: providerEntry.tokens,
+    }
+  }
+  return null
 }
 
 function planValue(map: Record<string, number> | undefined, e: QuotaSnapshot["entries"][number]): number | undefined {
@@ -422,7 +488,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
 
   const quotaAgeSec = Math.max(0, (now - quota.at) / 1000)
   const selectedProviderEntries = quota.entries.filter((e) => e.provider === selected.provider)
-  const forecast = buildForecast(input.prompts, selected) ?? (input.globalPrior ? forecastFromGlobal(input.globalPrior, selected) : null)
+  const forecast = buildForecast(input.prompts, selected) ?? (input.globalPrior ? forecastFromGlobal(input.globalPrior, selected, input.modelPricing) : null)
   base.forecast = forecast
 
   if (forecast) {

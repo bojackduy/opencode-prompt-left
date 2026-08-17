@@ -72,6 +72,21 @@ binds over 5h).
 - Compaction: the trigger threshold mirrors OpenCode's own overflow check (`context tokens ≥ usable`), and post-compaction context is modeled as summary + ~25% retained tail (2k–15k tokens).
 - The compact line shows the **best estimate**; the detail view also shows a conservative bound, confidence, and the full forecast breakdown.
 
+### New models
+
+When a new model is added (e.g. opencode-go adds MiMo-V2.5), the estimate
+adapts automatically — no config needed:
+
+1. **Model pricing** (from `provider.list()`) is refreshed every 5 minutes, so
+   a newly added model's limits/costs appear without restarting OpenCode.
+2. If you haven't used the new model in a directory yet, the **global prior**
+   kicks in: it takes the provider's observed token mix (input/cache/output
+   proportions from all your workloads) and scales it by the new model's own
+   pricing. Cheap models (like MiMo-V2.5 at $0.14/M input) immediately show
+   a much higher prompt count than expensive ones — no wait for calibration.
+3. Once you actually use the new model, local step-finish samples take over
+   and the estimate refines with your real usage patterns.
+
 ## Status
 
 | Compact line | Meaning |
