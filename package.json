@@ -3,7 +3,7 @@
   "version": "0.1.8",
   "description": "Estimates how many similar prompts remain before provider quota runs out, shown in the OpenCode compact line.",
   "type": "module",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "files": [
     "src",
     "assets",
