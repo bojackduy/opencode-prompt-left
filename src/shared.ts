@@ -55,6 +55,16 @@ export interface PromptUsage {
   toolOutputChars: number
 }
 
+export interface QuotaUsage {
+  cost: number
+  requests: number
+  tokens: number
+}
+
+export function emptyQuotaUsage(): QuotaUsage {
+  return { cost: 0, requests: 0, tokens: 0 }
+}
+
 export type CostFn = (provider: string, model: string | undefined, usage: PromptUsage) => number
 
 export interface PricingOverride {
@@ -126,6 +136,7 @@ export interface WindowTracker {
   lastPercent?: number
   lastPercentAt?: number
   observations: WindowObservation[]
+  pending?: QuotaUsage
 }
 
 export interface SelectedRegime {
@@ -151,6 +162,7 @@ export interface GlobalPriorEntry {
   tokens: number
   input: number
   cacheRead: number
+  cacheWrite?: number
   output: number
   reasoning: number
   n: number

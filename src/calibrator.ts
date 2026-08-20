@@ -5,6 +5,7 @@ import type {
   GlobalPriorEntry,
   PromptForecast,
   PromptUsage,
+  QuotaUsage,
   QuotaSnapshot,
   RootPrompt,
   SelectedRegime,
@@ -75,14 +76,14 @@ export function recentPrompts(
 
 function weighted(values: number[]): number {
   if (values.length === 0) return 0
-  const weights = values.map((_, i) => Math.pow(RECENCY_DECAY, values.length - 1 - i))
+  const weights = values.map((_, i) => Math.pow(RECENCY_DECAY, i))
   const total = weights.reduce((x, y) => x + y, 0)
   return values.reduce((acc, v, i) => acc + (v * weights[i]) / total, 0)
 }
 
 function weightedStd(values: number[], mean: number): number {
   if (values.length < 2) return 0
-  const weights = values.map((_, i) => Math.pow(RECENCY_DECAY, values.length - 1 - i))
+  const weights = values.map((_, i) => Math.pow(RECENCY_DECAY, i))
   const total = weights.reduce((x, y) => x + y, 0)
   const variance = values.reduce((acc, v, i) => acc + ((v - mean) ** 2 * weights[i]) / total, 0)
   return Math.sqrt(variance)
@@ -91,6 +92,7 @@ function weightedStd(values: number[], mean: number): number {
 export function buildForecast(
   prompts: RootPrompt[],
   selected: SelectedRegime,
+  pricing?: { input: number; output: number; cacheRead: number; cacheWrite: number } | null,
 ): PromptForecast | null {
   const { list, fallbackLevel } = recentPrompts(prompts, selected)
   if (list.length === 0) return null
@@ -100,7 +102,17 @@ export function buildForecast(
     .filter((u): u is PromptUsage => u !== null)
   if (rows.length === 0) return null
 
-  const cost = weighted(rows.map((u) => u.cost))
+  const costs = rows.map((u) => {
+    if (!pricing) return u.cost
+    const current =
+      (u.input * pricing.input +
+        (u.output + u.reasoning) * pricing.output +
+        u.cacheRead * pricing.cacheRead +
+        u.cacheWrite * pricing.cacheWrite) /
+      1_000_000
+    return current > 0 ? current : u.cost
+  })
+  const cost = weighted(costs)
   const tokens = weighted(rows.map((u) => u.input + u.cacheRead + u.cacheWrite + u.output + u.reasoning))
   const growthCandidates = list
     .filter((p) => !p.compacted && p.contextAfter !== undefined)
@@ -109,7 +121,6 @@ export function buildForecast(
   const compacted = list.filter((p) => p.compacted)
   const compactionCosts = compacted.map((p) => (p.compactionCost > 0 ? p.compactionCost : cost))
   const compactionCost = compactionCosts.length > 0 ? weighted(compactionCosts) : cost
-  const costs = rows.map((u) => u.cost)
   const costStd = weightedStd(costs, cost)
 
   return {
@@ -194,25 +205,27 @@ export function windowEstimates(input: {
   budgets?: Record<string, number>
   limits?: Record<string, number>
   tokenLimits?: Record<string, number>
+  pendingByWindow?: Record<string, QuotaUsage>
 }): WindowEstimate[] {
   return input.quota.entries
     .filter((e) => e.provider === input.provider)
     .map((e) => {
       const tracker = input.windows[`${e.provider}::${e.name}`]
+      const pending = input.pendingByWindow?.[`${e.provider}::${e.name}`]
       const stats = tracker ? rateStats(tracker.observations) : null
       const remaining = e.percentRemaining ?? 0
       const prompts =
         input.forecast && planValue(input.budgets, e) && input.forecast.cost > 0
-          ? budgetPrompts(remaining, planValue(input.budgets, e)!, input.forecast.cost)
+          ? budgetPrompts(remaining, planValue(input.budgets, e)!, input.forecast.cost, pending?.cost)
           : input.forecast && planValue(input.limits, e) && input.forecast.requests > 0
-            ? limitPrompts(remaining, planValue(input.limits, e)!, input.forecast.requests)
+            ? limitPrompts(remaining, planValue(input.limits, e)!, input.forecast.requests, pending?.requests)
             : input.forecast && planValue(input.tokenLimits, e) && input.forecast.tokens > 0
-              ? limitPrompts(remaining, planValue(input.tokenLimits, e)!, input.forecast.tokens)
+              ? limitPrompts(remaining, planValue(input.tokenLimits, e)!, input.forecast.tokens, pending?.tokens)
               : input.forecast && stats
                 ? simulatePrompts({
                     forecast: input.forecast,
                     rate: stats.median,
-                    remaining,
+                    remaining: Math.max(0, remaining - (pending?.cost ?? 0) * stats.median),
                     contextNow: input.contextNow,
                     usable: input.usable,
                   })
@@ -262,6 +275,7 @@ export interface EstimateInput {
   windowTokenLimits?: Record<string, number>
   globalPrior?: GlobalPrior
   modelPricing?: (provider: string, model: string) => { input: number; output: number; cacheRead: number; cacheWrite: number } | null
+  pendingByWindow?: Record<string, QuotaUsage>
 }
 
 function forecastFromGlobal(
@@ -272,21 +286,30 @@ function forecastFromGlobal(
   const modelKey = `${selected.provider ?? ""}|${selected.model ?? ""}`
   const exact = global.byRegime[modelKey]
   if (exact && exact.n > 0 && exact.cost > 0) {
+    const price = modelPricing && selected.model ? modelPricing(selected.provider ?? "", selected.model) : null
+    const currentCost = price
+      ? (exact.input * price.input +
+          (exact.output + exact.reasoning) * price.output +
+          exact.cacheRead * price.cacheRead +
+          (exact.cacheWrite ?? 0) * price.cacheWrite) /
+        1_000_000
+      : 0
+    const cost = currentCost > 0 ? currentCost : exact.cost
     return {
       sampleCount: Math.min(exact.n, 30),
       fallbackLevel: 2,
-      cost: exact.cost,
+      cost,
       requests: exact.requests,
       input: exact.input,
       cacheRead: exact.cacheRead,
-      cacheWrite: 0,
+      cacheWrite: exact.cacheWrite ?? 0,
       output: exact.output,
       reasoning: exact.reasoning,
       toolCalls: 0,
       toolOutputTokens: 0,
       childSessions: 0,
       contextGrowth: 0,
-      compactionCost: exact.cost,
+      compactionCost: cost,
       compactionRate: 0,
       costCv: 0,
       tokens: exact.tokens,
@@ -297,15 +320,11 @@ function forecastFromGlobal(
     if (modelPricing && selected.model) {
       const price = modelPricing(selected.provider ?? "", selected.model)
       if (price) {
-        const avgInput = providerEntry.input / providerEntry.requests
-        const avgOutput = providerEntry.output / providerEntry.requests
-        const avgCacheRead = providerEntry.cacheRead / providerEntry.requests
-        const avgReasoning = providerEntry.reasoning / providerEntry.requests
         const cost = (
-          avgInput * (price.input ?? 0) +
-          avgOutput * (price.output ?? 0) +
-          avgReasoning * (price.output ?? 0) +
-          avgCacheRead * (price.cacheRead ?? 0)
+          providerEntry.input * price.input +
+          (providerEntry.output + providerEntry.reasoning) * price.output +
+          providerEntry.cacheRead * price.cacheRead +
+          (providerEntry.cacheWrite ?? 0) * price.cacheWrite
         ) / 1_000_000
         if (cost > 0) {
           return {
@@ -313,11 +332,11 @@ function forecastFromGlobal(
             fallbackLevel: 1,
             cost,
             requests: providerEntry.requests,
-            input: avgInput,
-            cacheRead: avgCacheRead,
-            cacheWrite: 0,
-            output: avgOutput,
-            reasoning: avgReasoning,
+            input: providerEntry.input,
+            cacheRead: providerEntry.cacheRead,
+            cacheWrite: providerEntry.cacheWrite ?? 0,
+            output: providerEntry.output,
+            reasoning: providerEntry.reasoning,
             toolCalls: 0,
             toolOutputTokens: 0,
             childSessions: 0,
@@ -325,7 +344,7 @@ function forecastFromGlobal(
             compactionCost: cost,
             compactionRate: 0,
             costCv: 0,
-            tokens: providerEntry.requests > 0 ? Math.round(avgInput + avgCacheRead + avgOutput + avgReasoning) : 0,
+            tokens: providerEntry.tokens,
           }
         }
       }
@@ -337,7 +356,7 @@ function forecastFromGlobal(
       requests: providerEntry.requests,
       input: providerEntry.input,
       cacheRead: providerEntry.cacheRead,
-      cacheWrite: 0,
+      cacheWrite: providerEntry.cacheWrite ?? 0,
       output: providerEntry.output,
       reasoning: providerEntry.reasoning,
       toolCalls: 0,
@@ -358,6 +377,28 @@ function planValue(map: Record<string, number> | undefined, e: QuotaSnapshot["en
   return map[e.window ?? ""] ?? map[e.name]
 }
 
+export function reconcilePendingUsage(
+  pending: QuotaUsage,
+  deltaPct: number,
+  capacity: { budget?: number; limit?: number; tokenLimit?: number; ratePP?: number },
+): QuotaUsage {
+  const next = { ...pending }
+  if (capacity.budget && capacity.budget > 0) {
+    next.cost = Math.max(0, next.cost - (capacity.budget * deltaPct) / 100)
+  } else if (capacity.limit && capacity.limit > 0) {
+    next.requests = Math.max(0, next.requests - (capacity.limit * deltaPct) / 100)
+  } else if (capacity.tokenLimit && capacity.tokenLimit > 0) {
+    next.tokens = Math.max(0, next.tokens - (capacity.tokenLimit * deltaPct) / 100)
+  } else if (capacity.ratePP && capacity.ratePP > 0) {
+    next.cost = Math.max(0, next.cost - deltaPct / capacity.ratePP)
+  } else {
+    next.cost = 0
+    next.requests = 0
+    next.tokens = 0
+  }
+  return next
+}
+
 function compactPrefix(selected: SelectedRegime): string {
   if (selected.provider && selected.model) return `${selected.provider}/${selected.model} `
   return ""
@@ -372,25 +413,27 @@ function safeCost(cost: number, cv: number, n: number): number {
   return cost * safeFactor(cv, n)
 }
 
-function budgetPrompts(remainingPct: number, budget: number, cost: number): number | null {
+function budgetPrompts(remainingPct: number, budget: number, cost: number, pendingCost = 0): number | null {
   if (!budget || budget <= 0 || !cost || cost <= 0) return null
-  return Math.floor(((budget * remainingPct) / 100) / cost)
+  return Math.floor(Math.max(0, (budget * remainingPct) / 100 - pendingCost) / cost)
 }
 
-function limitPrompts(remainingPct: number, limit: number, perPrompt: number): number | null {
+function limitPrompts(remainingPct: number, limit: number, perPrompt: number, pending = 0): number | null {
   if (!limit || limit <= 0 || !perPrompt || perPrompt <= 0) return null
-  return Math.floor(((limit * remainingPct) / 100) / perPrompt)
+  return Math.floor(Math.max(0, (limit * remainingPct) / 100 - pending) / perPrompt)
 }
 
 function worstBudgetEntry(
   selectedProviderEntries: QuotaSnapshot["entries"],
   windowBudgets?: Record<string, number>,
+  pendingByWindow?: Record<string, QuotaUsage>,
 ): { entry: QuotaSnapshot["entries"][number]; budget: number } | null {
   let best: { entry: QuotaSnapshot["entries"][number]; budget: number; usd: number } | null = null
   for (const e of selectedProviderEntries) {
     const budget = planValue(windowBudgets, e)
     if (!budget || budget <= 0) continue
-    const usd = (budget * (e.percentRemaining ?? 0)) / 100
+    const pending = pendingByWindow?.[`${e.provider}::${e.name}`]
+    const usd = Math.max(0, (budget * (e.percentRemaining ?? 0)) / 100 - (pending?.cost ?? 0))
     if (!best || usd < best.usd) {
       best = { entry: e, budget, usd }
     }
@@ -402,9 +445,11 @@ function budgetOnlyEstimate(
   base: EstimateFile,
   entry: QuotaSnapshot["entries"][number],
   budget: number,
+  pending?: QuotaUsage,
 ): EstimateFile {
-  const remaining = entry.percentRemaining ?? 0
-  const remainingUSD = (budget * remaining) / 100
+  const rawRemaining = entry.percentRemaining ?? 0
+  const remainingUSD = Math.max(0, (budget * rawRemaining) / 100 - (pending?.cost ?? 0))
+  const remaining = (remainingUSD / budget) * 100
   const prompts = Math.floor(remaining / PRIOR_BURN_SAFE)
   base.status = "ready"
   base.compact = `${compactPrefix(base.selected)}≈${Math.max(0, prompts)} prompts · ${entry.window ?? entry.name}`
@@ -488,7 +533,11 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
 
   const quotaAgeSec = Math.max(0, (now - quota.at) / 1000)
   const selectedProviderEntries = quota.entries.filter((e) => e.provider === selected.provider)
-  const forecast = buildForecast(input.prompts, selected) ?? (input.globalPrior ? forecastFromGlobal(input.globalPrior, selected, input.modelPricing) : null)
+  const selectedPricing =
+    selected.provider && selected.model ? input.modelPricing?.(selected.provider, selected.model) : null
+  const forecast =
+    buildForecast(input.prompts, selected, selectedPricing) ??
+    (input.globalPrior ? forecastFromGlobal(input.globalPrior, selected, input.modelPricing) : null)
   base.forecast = forecast
 
   if (forecast) {
@@ -500,7 +549,13 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   }
 
   const providerForecast = (provider: string) =>
-    provider === selected.provider ? forecast : buildForecast(input.prompts, { provider, model: selected.model, agent: selected.agent })
+    provider === selected.provider
+      ? forecast
+      : buildForecast(
+          input.prompts,
+          { provider, model: selected.model, agent: selected.agent },
+          selected.model ? input.modelPricing?.(provider, selected.model) : null,
+        )
 
   const providers = [...new Set(quota.entries.map((e) => e.provider))]
   base.perProvider = providers.map((provider) => {
@@ -517,6 +572,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
         budgets: provider === selected.provider ? input.windowBudgets : undefined,
         limits: provider === selected.provider ? input.windowLimits : undefined,
         tokenLimits: provider === selected.provider ? input.windowTokenLimits : undefined,
+        pendingByWindow: input.pendingByWindow,
       }),
     }
   })
@@ -535,8 +591,15 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   }
 
   if (!forecast) {
-    const worst = worstBudgetEntry(selectedProviderEntries, input.windowBudgets)
-    if (worst) return budgetOnlyEstimate(base, worst.entry, worst.budget)
+    const worst = worstBudgetEntry(selectedProviderEntries, input.windowBudgets, input.pendingByWindow)
+    if (worst) {
+      return budgetOnlyEstimate(
+        base,
+        worst.entry,
+        worst.budget,
+        input.pendingByWindow?.[`${worst.entry.provider}::${worst.entry.name}`],
+      )
+    }
     return priorEstimate(base, selectedProviderEntries, quotaAgeSec)
   }
 
@@ -550,6 +613,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   let rateObsCount = 0
   for (const e of selectedProviderEntries) {
     const remaining = e.percentRemaining ?? 0
+    const pending = input.pendingByWindow?.[`${e.provider}::${e.name}`]
     const budget = planValue(input.windowBudgets, e)
     const limit = planValue(input.windowLimits, e)
     const tokenLimit = planValue(input.windowTokenLimits, e)
@@ -560,22 +624,33 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
     let stats: RateStats | null = null
     let limitUnit: "requests" | "tokens" | undefined
     if (budget && forecast.cost > 0) {
-      best = budgetPrompts(remaining, budget, forecast.cost)
-      safe = budgetPrompts(remaining, budget, safeCost(forecast.cost, forecast.costCv, forecast.sampleCount))
+      best = budgetPrompts(remaining, budget, forecast.cost, pending?.cost)
+      safe = budgetPrompts(
+        remaining,
+        budget,
+        safeCost(forecast.cost, forecast.costCv, forecast.sampleCount),
+        pending?.cost,
+      )
       burnPP = (forecast.cost / budget) * 100
       method = "budget"
     } else if (limit && forecast.requests > 0) {
-      best = limitPrompts(remaining, limit, forecast.requests)
+      best = limitPrompts(remaining, limit, forecast.requests, pending?.requests)
       safe = limitPrompts(
         remaining,
         limit,
         forecast.requests * safeFactor(forecast.costCv, forecast.sampleCount),
+        pending?.requests,
       )
       limitUnit = "requests"
       method = "limit"
     } else if (tokenLimit && forecast.tokens > 0) {
-      best = limitPrompts(remaining, tokenLimit, forecast.tokens)
-      safe = limitPrompts(remaining, tokenLimit, forecast.tokens * safeFactor(forecast.costCv, forecast.sampleCount))
+      best = limitPrompts(remaining, tokenLimit, forecast.tokens, pending?.tokens)
+      safe = limitPrompts(
+        remaining,
+        tokenLimit,
+        forecast.tokens * safeFactor(forecast.costCv, forecast.sampleCount),
+        pending?.tokens,
+      )
       limitUnit = "tokens"
       method = "limit"
     } else {
@@ -586,7 +661,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
         ? simulatePrompts({
             forecast,
             rate: stats.median,
-            remaining,
+            remaining: Math.max(0, remaining - (pending?.cost ?? 0) * stats.median),
             contextNow: input.contextNow,
             usable: input.usableContext,
           })
@@ -595,7 +670,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
         ? simulatePrompts({
             forecast,
             rate: stats.safe,
-            remaining,
+            remaining: Math.max(0, remaining - (pending?.cost ?? 0) * stats.safe),
             contextNow: input.contextNow,
             usable: input.usableContext,
           })
@@ -616,18 +691,34 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
         resetAt: e.resetAt,
         method,
         budget: method === "budget" ? budget : undefined,
-        remainingUSD: method === "budget" && budget ? (budget * remaining) / 100 : undefined,
+        remainingUSD:
+          method === "budget" && budget
+            ? Math.max(0, (budget * remaining) / 100 - (pending?.cost ?? 0))
+            : undefined,
         limit: limitValue,
         limitUnit: method === "limit" ? limitUnit : undefined,
         remainingAbs:
-          method === "limit" && limitValue ? (limitValue * remaining) / 100 : undefined,
+          method === "limit" && limitValue
+            ? Math.max(
+                0,
+                (limitValue * remaining) / 100 -
+                  (limitUnit === "tokens" ? (pending?.tokens ?? 0) : (pending?.requests ?? 0)),
+              )
+            : undefined,
       }
     }
   }
 
   if (binding === null) {
-    const worst = worstBudgetEntry(selectedProviderEntries, input.windowBudgets)
-    if (worst) return budgetOnlyEstimate(base, worst.entry, worst.budget)
+    const worst = worstBudgetEntry(selectedProviderEntries, input.windowBudgets, input.pendingByWindow)
+    if (worst) {
+      return budgetOnlyEstimate(
+        base,
+        worst.entry,
+        worst.budget,
+        input.pendingByWindow?.[`${worst.entry.provider}::${worst.entry.name}`],
+      )
+    }
     return priorEstimate(base, selectedProviderEntries, quotaAgeSec)
   }
 

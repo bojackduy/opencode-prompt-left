@@ -68,6 +68,7 @@ binds over 5h).
 
 - A **root prompt** is one top-level user message, including everything it spawned: tool loops, retries, child/subagent sessions, and compaction.
 - Workload comes from OpenCode's exact `step-finish` usage records (per-request tokens and cost), deduplicated — not cumulative message snapshots.
+- Prompt submission immediately reserves one forecast prompt against the last quota snapshot. As `step-finish` usage arrives, the reservation is replaced by actual cost/requests/tokens; a later quota update reconciles that local debit instead of subtracting it twice.
 - Each quota window (5h / Weekly / Monthly) has its own rate. Rates are computed only from percentage changes that coincide with local usage; zero-delta polls keep accumulating cost so unchanged percentages are never miscounted as free prompts.
 - Compaction: the trigger threshold mirrors OpenCode's own overflow check (`context tokens ≥ usable`), and post-compaction context is modeled as summary + ~25% retained tail (2k–15k tokens).
 - The compact line shows the **best estimate**; the detail view also shows a conservative bound, confidence, and the full forecast breakdown.
@@ -134,8 +135,8 @@ it self-corrects at submit.
 
 ### Any other trigger
 
-Every recompute (1s debounce) updates `estimate.json`, which the TUI polls
-every 2.5s:
+Every recompute updates `estimate.json`, which the TUI watches immediately and
+also polls every 2.5s as a safety net:
 
 | Trigger | Source |
 |---|---|

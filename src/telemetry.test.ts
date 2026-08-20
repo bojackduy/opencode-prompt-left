@@ -97,6 +97,13 @@ describe("Telemetry", () => {
     expect(u.input).toBe(500)
     expect(u.cacheRead).toBe(2000)
     expect(finished.contextAfter).toBe(2500)
+    expect(t.drainUsageDeltas()).toEqual([
+      {
+        rootSessionID: "root",
+        provider: "opencode-go",
+        usage: { cost: 0.02, requests: 1, tokens: 2550 },
+      },
+    ])
   })
 
   test("tool completions count once with output chars", () => {
@@ -282,6 +289,7 @@ describe("Telemetry", () => {
     t.finalizeAll()
     const u = t.finished.at(-1)!.byProvider["openai"]
     expect(u.cost).toBeCloseTo((10_000 * 0.5 + 1_000 * 2 + 40_000 * 0.05) / 1_000_000)
+    expect(t.drainUsageDeltas()[0].usage.cost).toBeCloseTo(u.cost)
   })
 
   test("setActiveSession accepts sessions not seen in this instance", () => {

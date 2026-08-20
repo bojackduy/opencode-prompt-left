@@ -1,10 +1,16 @@
 import type { Event, Message, Part } from "@opencode-ai/sdk"
-import type { CostFn, HistoryState, PromptUsage, RootPrompt, SelectedRegime } from "./shared"
+import type { CostFn, HistoryState, PromptUsage, QuotaUsage, RootPrompt, SelectedRegime } from "./shared"
 import { emptyUsage } from "./shared"
 
 const MAX_PROMPTS = 200
 const MAX_OWNER_ENTRIES = 4000
 const MAX_SEEN_ENTRIES = 8000
+
+export interface TelemetryUsageDelta {
+  rootSessionID: string
+  provider: string
+  usage: QuotaUsage
+}
 
 export class Telemetry {
   private sessionRoot = new Map<string, string>()
@@ -24,6 +30,7 @@ export class Telemetry {
   private promptSeq = 0
   private selSeq = 0
   private costFn?: CostFn
+  private usageDeltas: TelemetryUsageDelta[] = []
 
   finished: RootPrompt[] = []
   lastSelected?: SelectedRegime
@@ -193,15 +200,33 @@ export class Telemetry {
       if (prompt) {
         const provider = this.msgProvider.get(p.messageID) ?? prompt.provider ?? "unknown"
         const u = (prompt.byProvider[provider] ??= emptyUsage())
-        u.requests++
-        u.input += p.tokens.input
-        u.cacheRead += p.tokens.cache.read
-        u.cacheWrite += p.tokens.cache.write
-        u.output += p.tokens.output
-        u.reasoning += p.tokens.reasoning
-        u.cost += p.cost
+        const delta = emptyUsage()
+        delta.requests = 1
+        delta.input = p.tokens.input
+        delta.cacheRead = p.tokens.cache.read
+        delta.cacheWrite = p.tokens.cache.write
+        delta.output = p.tokens.output
+        delta.reasoning = p.tokens.reasoning
+        delta.cost = p.cost
+        if (delta.cost <= 0 && this.costFn) delta.cost = this.costFn(provider, prompt.model, delta)
+        u.requests += delta.requests
+        u.input += delta.input
+        u.cacheRead += delta.cacheRead
+        u.cacheWrite += delta.cacheWrite
+        u.output += delta.output
+        u.reasoning += delta.reasoning
+        u.cost += delta.cost
+        this.usageDeltas.push({
+          rootSessionID: root,
+          provider,
+          usage: {
+            cost: delta.cost,
+            requests: delta.requests,
+            tokens: delta.input + delta.cacheRead + delta.cacheWrite + delta.output + delta.reasoning,
+          },
+        })
         if (this.compactionMsgs.has(p.messageID)) {
-          prompt.compactionCost += p.cost
+          prompt.compactionCost += delta.cost
           prompt.compacted = true
         }
       }
@@ -303,7 +328,14 @@ export class Telemetry {
         const tokens = u.input + u.cacheRead + u.cacheWrite + u.output + u.reasoning
         if (tokens <= 0) continue
         const cost = this.costFn(provider, prompt.model, u)
-        if (cost > 0) u.cost = cost
+        if (cost > 0) {
+          u.cost = cost
+          this.usageDeltas.push({
+            rootSessionID: root,
+            provider,
+            usage: { cost, requests: 0, tokens: 0 },
+          })
+        }
       }
     }
     this.finished.push(prompt)
@@ -325,6 +357,18 @@ export class Telemetry {
       total += p.byProvider[provider]?.cost ?? 0
     }
     return total
+  }
+
+  drainUsageDeltas(): TelemetryUsageDelta[] {
+    return this.usageDeltas.splice(0)
+  }
+
+  rootFor(sessionID: string): string {
+    return this.resolveRoot(sessionID)
+  }
+
+  hasActivePrompt(sessionID: string): boolean {
+    return this.activeByRoot.has(this.resolveRoot(sessionID))
   }
 
   setActiveSession(sessionID: string): void {

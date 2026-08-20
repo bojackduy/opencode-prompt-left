@@ -5,10 +5,11 @@ import { dirname, join } from "node:path"
 import { Telemetry } from "./telemetry"
 import { readQuotaSnapshot } from "./quota"
 import { loadPlans, type Plans } from "./budget"
-import { computeEstimate, type EstimateInput } from "./calibrator"
+import { computeEstimate, rateStats, reconcilePendingUsage, type EstimateInput } from "./calibrator"
 import {
   CONFIG_PATH,
   GLOBAL_PRIOR_PATH,
+  emptyQuotaUsage,
   freshHistory,
   readJson,
   statePaths,
@@ -21,6 +22,8 @@ import {
   type GlobalPriorEntry,
   type HistoryState,
   type PricingOverride,
+  type QuotaEntry,
+  type QuotaUsage,
   type TuiSelection,
   type WindowTracker,
 } from "./shared"
@@ -52,6 +55,12 @@ interface ModelInfo {
   cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number }
 }
 
+interface PromptReservation {
+  provider: string
+  expected: QuotaUsage
+  actual: QuotaUsage
+}
+
 const KEY = workspaceKey(process.cwd())
 const paths = statePaths(KEY)
 
@@ -76,6 +85,7 @@ const plugin: Plugin = async ({ client }, _options) => {
 
   let plans: Plans = loadPlans()
   let quota = readQuotaSnapshot()
+  const reservations = new Map<string, PromptReservation>()
   const rawPrior = readJson<GlobalPrior>(GLOBAL_PRIOR_PATH)
   let globalPrior: GlobalPrior =
     rawPrior?.version === 2 ? rawPrior : { version: 2, byRegime: {}, byProvider: {} }
@@ -247,6 +257,7 @@ const plugin: Plugin = async ({ client }, _options) => {
     tokens: number,
     input: number,
     cacheRead: number,
+    cacheWrite: number,
     output: number,
     reasoning: number,
   ): GlobalPriorEntry {
@@ -258,6 +269,7 @@ const plugin: Plugin = async ({ client }, _options) => {
       tokens: entry ? entry.tokens * (1 - alpha) + tokens * alpha : tokens,
       input: entry ? entry.input * (1 - alpha) + input * alpha : input,
       cacheRead: entry ? entry.cacheRead * (1 - alpha) + cacheRead * alpha : cacheRead,
+      cacheWrite: entry ? (entry.cacheWrite ?? 0) * (1 - alpha) + cacheWrite * alpha : cacheWrite,
       output: entry ? entry.output * (1 - alpha) + output * alpha : output,
       reasoning: entry ? entry.reasoning * (1 - alpha) + reasoning * alpha : reasoning,
       n,
@@ -275,12 +287,12 @@ const plugin: Plugin = async ({ client }, _options) => {
         const tokens = u.input + u.cacheRead + u.cacheWrite + u.output + u.reasoning
         globalPrior.byProvider[provider] = mergePriorEntry(
           globalPrior.byProvider[provider], u.cost, u.requests, tokens,
-          u.input, u.cacheRead, u.output + u.reasoning, 0,
+          u.input, u.cacheRead, u.cacheWrite, u.output, u.reasoning,
         )
         const modelKey = `${provider}|${p.model ?? ""}`
         globalPrior.byRegime[modelKey] = mergePriorEntry(
           globalPrior.byRegime[modelKey], u.cost, u.requests, tokens,
-          u.input, u.cacheRead, u.output + u.reasoning, 0,
+          u.input, u.cacheRead, u.cacheWrite, u.output, u.reasoning,
         )
       }
     }
@@ -295,6 +307,91 @@ const plugin: Plugin = async ({ client }, _options) => {
     history.activeSession = telemetry.activeRoot
     updateGlobalPrior()
     writeJsonAtomic(paths.history, history)
+  }
+
+  function windowValue(map: Record<string, number> | undefined, entry: QuotaEntry): number | undefined {
+    if (!map) return undefined
+    return map[entry.window ?? ""] ?? map[entry.name]
+  }
+
+  function addQuotaUsage(target: QuotaUsage, delta: QuotaUsage) {
+    target.cost += delta.cost
+    target.requests += delta.requests
+    target.tokens += delta.tokens
+  }
+
+  function drainUsageDeltas() {
+    for (const delta of telemetry.drainUsageDeltas()) {
+      for (const entry of quota?.entries ?? []) {
+        if (entry.provider !== delta.provider) continue
+        const tracker = (history.windows[`${entry.provider}::${entry.name}`] ??= { observations: [] })
+        const pending = (tracker.pending ??= emptyQuotaUsage())
+        addQuotaUsage(pending, delta.usage)
+      }
+      const reservation = reservations.get(delta.rootSessionID)
+      if (reservation?.provider === delta.provider) addQuotaUsage(reservation.actual, delta.usage)
+    }
+  }
+
+  function pruneReservations() {
+    for (const root of reservations.keys()) {
+      if (!telemetry.hasActivePrompt(root)) reservations.delete(root)
+    }
+  }
+
+  function pendingByWindow(): Record<string, QuotaUsage> {
+    const out: Record<string, QuotaUsage> = {}
+    for (const entry of quota?.entries ?? []) {
+      const key = `${entry.provider}::${entry.name}`
+      const persisted = history.windows[key]?.pending
+      out[key] = persisted ? { ...persisted } : emptyQuotaUsage()
+      for (const reservation of reservations.values()) {
+        if (reservation.provider !== entry.provider) continue
+        out[key].cost += Math.max(0, reservation.expected.cost - reservation.actual.cost)
+        out[key].requests += Math.max(0, reservation.expected.requests - reservation.actual.requests)
+        out[key].tokens += Math.max(0, reservation.expected.tokens - reservation.actual.tokens)
+      }
+    }
+    return out
+  }
+
+  function estimateInput(): EstimateInput {
+    const selected = telemetry.activeSelected()
+    return {
+      now: Date.now(),
+      quota,
+      prompts: telemetry.finished,
+      windows: history.windows,
+      selected,
+      contextNow: telemetry.contextNow(),
+      usableContext: usableContext(selected.provider, selected.model),
+      externalShare: history.externalShare,
+      windowBudgets: selected.provider ? plans.budgets[selected.provider] : undefined,
+      windowLimits: selected.provider ? plans.limits[selected.provider] : undefined,
+      windowTokenLimits: selected.provider ? plans.tokenLimits[selected.provider] : undefined,
+      globalPrior,
+      pendingByWindow: pendingByWindow(),
+      modelPricing: (provider, model) => {
+        const c = modelCatalog.get(modelKey(provider, model))?.cost
+        return c
+          ? { input: c.input ?? 0, output: c.output ?? 0, cacheRead: c.cacheRead ?? 0, cacheWrite: c.cacheWrite ?? 0 }
+          : null
+      },
+    }
+  }
+
+  function reservePrompt(sessionID: string, provider: string | undefined, replace = true) {
+    const root = telemetry.rootFor(sessionID)
+    if (!replace && reservations.has(root)) return
+    reservations.delete(root)
+    if (!provider) return
+    const forecast = computeEstimate(estimateInput()).forecast
+    if (!forecast) return
+    reservations.set(root, {
+      provider,
+      expected: { cost: forecast.cost, requests: forecast.requests, tokens: forecast.tokens },
+      actual: emptyQuotaUsage(),
+    })
   }
 
   function refreshQuota() {
@@ -320,6 +417,12 @@ const plugin: Plugin = async ({ client }, _options) => {
       if (e.percentRemaining < prev) {
         const delta = prev - e.percentRemaining
         const localCost = telemetry.providerCostSince(e.provider, tracker.lastPercentAt ?? 0)
+        tracker.pending = reconcilePendingUsage(tracker.pending ?? emptyQuotaUsage(), delta, {
+          budget: windowValue(plans.budgets[e.provider], e),
+          limit: windowValue(plans.limits[e.provider], e),
+          tokenLimit: windowValue(plans.tokenLimits[e.provider], e),
+          ratePP: rateStats(tracker.observations)?.median,
+        })
         tracker.observations.push({ at: now, deltaPct: delta, localCost })
         if (tracker.observations.length > MAX_WINDOW_OBSERVATIONS) tracker.observations.shift()
         tracker.lastPercent = e.percentRemaining
@@ -327,6 +430,7 @@ const plugin: Plugin = async ({ client }, _options) => {
         const share = localCost > 0 ? 0 : 1
         history.externalShare = EXTERNAL_EWMA_ALPHA * share + (1 - EXTERNAL_EWMA_ALPHA) * history.externalShare
       } else if (e.percentRemaining > prev) {
+        tracker.pending = emptyQuotaUsage()
         tracker.lastPercent = e.percentRemaining
         tracker.lastPercentAt = now
       }
@@ -354,26 +458,7 @@ const plugin: Plugin = async ({ client }, _options) => {
   }
 
   function recompute() {
-    const selected = telemetry.activeSelected()
-    const input: EstimateInput = {
-      now: Date.now(),
-      quota,
-      prompts: telemetry.finished,
-      windows: history.windows,
-      selected,
-      contextNow: telemetry.contextNow(),
-      usableContext: usableContext(selected.provider, selected.model),
-      externalShare: history.externalShare,
-      windowBudgets: selected.provider ? plans.budgets[selected.provider] : undefined,
-      windowLimits: selected.provider ? plans.limits[selected.provider] : undefined,
-      windowTokenLimits: selected.provider ? plans.tokenLimits[selected.provider] : undefined,
-      globalPrior,
-      modelPricing: (provider, model) => {
-        const c = modelCatalog.get(modelKey(provider, model))?.cost
-        return c ? { input: c.input ?? 0, output: c.output ?? 0, cacheRead: c.cacheRead ?? 0, cacheWrite: c.cacheWrite ?? 0 } : null
-      },
-    }
-    const estimate: EstimateFile = computeEstimate(input)
+    const estimate: EstimateFile = computeEstimate(estimateInput())
     writeJsonAtomic(paths.estimate, estimate)
   }
 
@@ -407,6 +492,12 @@ const plugin: Plugin = async ({ client }, _options) => {
     async event({ event }: { event: Event }) {
       if (!TRACKED_EVENTS.has(event.type)) return
       telemetry.handle(event)
+      drainUsageDeltas()
+      pruneReservations()
+      if (event.type === "message.updated" && event.properties.info.role === "user") {
+        const message = event.properties.info
+        reservePrompt(message.sessionID, message.model.providerID, false)
+      }
       scheduleRecompute()
     },
     async "chat.message"(input: { sessionID: string; agent?: string; model?: { providerID: string; modelID: string } }) {
@@ -416,7 +507,10 @@ const plugin: Plugin = async ({ client }, _options) => {
         agent: input.agent,
       })
       telemetry.beginPrompt(input.sessionID, input.agent, input.model?.providerID, input.model?.modelID)
-      scheduleRecompute()
+      drainUsageDeltas()
+      reservePrompt(input.sessionID, input.model?.providerID)
+      saveHistory()
+      recompute()
     },
     async dispose() {
       if (pollTimer) clearInterval(pollTimer)
@@ -429,6 +523,8 @@ const plugin: Plugin = async ({ client }, _options) => {
         } catch {}
       }
       telemetry.finalizeAll()
+      drainUsageDeltas()
+      pruneReservations()
       saveHistory()
       recompute()
     },

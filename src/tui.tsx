@@ -7,6 +7,7 @@ import { dirname, join } from "node:path"
 import { statePaths, workspaceKey, type ActiveFile, type EstimateFile, type TuiSelection } from "./shared"
 
 const POLL_INTERVAL_MS = 2_500
+const ESTIMATE_DEBOUNCE_MS = 100
 const SLOT_ORDER = 95
 const SELECTION_DEBOUNCE_MS = 300
 const ACTIVE_WRITE_MS = 2_500
@@ -311,7 +312,23 @@ const tui: TuiPlugin = async (api) => {
   }
   poll()
   const timer = setInterval(poll, POLL_INTERVAL_MS)
-  api.lifecycle.onDispose(() => clearInterval(timer))
+  let estimateTimer: ReturnType<typeof setTimeout> | undefined
+  let estimateWatcher: ReturnType<typeof watch> | undefined
+  try {
+    mkdirSync(paths.dir, { recursive: true })
+    estimateWatcher = watch(paths.dir, () => {
+      if (estimateTimer) clearTimeout(estimateTimer)
+      estimateTimer = setTimeout(() => {
+        estimateTimer = undefined
+        poll()
+      }, ESTIMATE_DEBOUNCE_MS)
+    })
+  } catch {}
+  api.lifecycle.onDispose(() => {
+    clearInterval(timer)
+    if (estimateTimer) clearTimeout(estimateTimer)
+    estimateWatcher?.close()
+  })
 
   const stopModelWatch = watchModelSelection(api)
   api.lifecycle.onDispose(stopModelWatch)

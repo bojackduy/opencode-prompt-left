@@ -5,6 +5,7 @@ import {
   confidenceLabel,
   confidenceScore,
   rateStats,
+  reconcilePendingUsage,
   recentPrompts,
   regimeKey,
   simulatePrompts,
@@ -89,8 +90,10 @@ describe("buildForecast", () => {
     expect(f.sampleCount).toBe(3)
     expect(f.cost).toBeGreaterThan(0.05)
     expect(f.cost).toBeLessThan(0.1)
+    expect(f.cost).toBeLessThan((0.05 + 0.1 + 0.1) / 3)
     expect(f.requests).toBeGreaterThan(2)
     expect(f.requests).toBeLessThan(10)
+    expect(f.requests).toBeLessThan((2 + 10 + 10) / 3)
     expect(f.contextGrowth).toBeCloseTo(20_000)
   })
 
@@ -103,6 +106,30 @@ describe("buildForecast", () => {
     expect(f.contextGrowth).toBeCloseTo(20_000)
     expect(f.compactionCost).toBeCloseTo(0.12)
     expect(f.compactionRate).toBeCloseTo(0.5)
+  })
+
+  test("current pricing reprices historical token mix", () => {
+    const f = buildForecast(
+      [prompt({ provider: "opencode-go", model: "m", agent: "build", byProvider: { "opencode-go": usage({ cost: 0.1, input: 1_000_000 }) } })],
+      { provider: "opencode-go", model: "m", agent: "build" },
+      { input: 2, output: 0, cacheRead: 0, cacheWrite: 0 },
+    )!
+    expect(f.cost).toBeCloseTo(2)
+  })
+})
+
+describe("pending usage", () => {
+  test("reconciles only the capacity confirmed by a quota drop", () => {
+    const pending = { cost: 3, requests: 30, tokens: 3000 }
+    const partial = reconcilePendingUsage(pending, 1, { budget: 100 })
+    expect(partial.cost).toBeCloseTo(2)
+    expect(partial.requests).toBe(30)
+    expect(reconcilePendingUsage(partial, 2, { budget: 100 }).cost).toBe(0)
+  })
+
+  test("reconciles request and token limits in their own units", () => {
+    expect(reconcilePendingUsage({ cost: 0, requests: 20, tokens: 0 }, 10, { limit: 100 }).requests).toBe(10)
+    expect(reconcilePendingUsage({ cost: 0, requests: 0, tokens: 2000 }, 10, { tokenLimit: 10_000 }).tokens).toBe(1000)
   })
 })
 
@@ -245,6 +272,42 @@ describe("computeEstimate", () => {
     expect(weekly.prompts).toBe(Math.floor(2.1 / 0.05))
   })
 
+  test("optimistic pending cost changes 39 prompts to 38 before quota refresh", () => {
+    const snapshot: QuotaSnapshot = {
+      at: 1_000_000,
+      fromExport: true,
+      entries: [{ provider: "opencode-go", name: "Weekly", window: "Weekly", percentRemaining: 39 }],
+    }
+    const input = {
+      now: 1_000_010,
+      quota: snapshot,
+      prompts: [prompt({ provider: "opencode-go", model: "m", agent: "build", byProvider: { "opencode-go": usage({ cost: 1 }) } })],
+      windows: {},
+      selected: { provider: "opencode-go", model: "m", agent: "build" },
+      contextNow: null,
+      usableContext: null,
+      externalShare: 0,
+      windowBudgets: { Weekly: 100 },
+    }
+    expect(computeEstimate(input).likely).toBe(39)
+    const pendingInput = {
+      ...input,
+      pendingByWindow: { "opencode-go::Weekly": { cost: 1, requests: 3, tokens: 0 } },
+    }
+    expect(computeEstimate(pendingInput).likely).toBe(38)
+    expect(computeEstimate(pendingInput).likely).toBe(38)
+
+    const reconciledPending = reconcilePendingUsage(pendingInput.pendingByWindow["opencode-go::Weekly"], 1, {
+      budget: 100,
+    })
+    const caughtUp = computeEstimate({
+      ...pendingInput,
+      quota: { ...snapshot, entries: [{ ...snapshot.entries[0], percentRemaining: 38 }] },
+      pendingByWindow: { "opencode-go::Weekly": reconciledPending },
+    })
+    expect(caughtUp.likely).toBe(38)
+  })
+
   test("binding picks the window with the least dollars-left prompts", () => {
     const prompts = [
       prompt({ finishedAt: 1, provider: "opencode-go", model: "m", agent: "build", byProvider: { "opencode-go": usage({ cost: 0.05 }) } }),
@@ -314,11 +377,13 @@ describe("computeEstimate", () => {
       globalPrior,
       modelPricing: pricing,
     })
-    // cost = (80k×0.14 + 5500k×0.0028 + 2k×0.28 + 1k×0.28)/1e6 = (11200+15400+560+280)/1e6 ≈ $0.0274
-    // 5h: 12 × 100% / 0.0274 ≈ 437 prompts
+    // cost = (80k×0.14 + 5500k×0.0028 + 2k×0.28 + 1k×0.28)/1e6 = $0.02744
+    // Weekly binds: $30 × 7% / $0.02744 = 76 prompts
     expect(est.status).toBe("ready")
     expect(est.binding?.method).toBe("budget")
-    expect(est.likely).toBeGreaterThan(100)
+    expect(est.forecast?.cost).toBeCloseTo(0.02744)
+    expect(est.binding?.window).toBe("Weekly")
+    expect(est.likely).toBe(76)
   })
 
   test("global prior fills the cold start so budget converts to real prompts", () => {
