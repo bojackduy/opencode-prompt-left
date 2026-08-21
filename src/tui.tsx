@@ -298,7 +298,12 @@ function DetailView(props: { api: Parameters<TuiPlugin>[0]; estimate: () => Esti
   )
 }
 
+let tuiMounted = false
+
 const tui: TuiPlugin = async (api) => {
+  if (tuiMounted) return
+  tuiMounted = true
+
   const [estimate, setEstimate] = createSignal<EstimateFile | null>(null)
   let last = ""
 
@@ -325,6 +330,7 @@ const tui: TuiPlugin = async (api) => {
     })
   } catch {}
   api.lifecycle.onDispose(() => {
+    tuiMounted = false
     clearInterval(timer)
     if (estimateTimer) clearTimeout(estimateTimer)
     estimateWatcher?.close()
