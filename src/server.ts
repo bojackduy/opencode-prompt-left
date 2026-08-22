@@ -2,6 +2,10 @@ import type { Event } from "@opencode-ai/sdk"
 import type { Plugin } from "@opencode-ai/plugin"
 import { watch, mkdirSync, statSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { EventEmitter } from "node:events"
+
+try { EventEmitter.defaultMaxListeners = 20 } catch {}
+try { (process as unknown as { setMaxListeners?: (n: number) => void }).setMaxListeners?.(20) } catch {}
 import { Telemetry } from "./telemetry"
 import { readQuotaSnapshot } from "./quota"
 import { loadPlans, type Plans } from "./budget"
@@ -149,7 +153,9 @@ const plugin: Plugin = async ({ client }, _options) => {
     mkdirSync(paths.dir, { recursive: true })
     refreshBridge()
     try {
-      dirWatcher = watch(paths.dir, () => {
+      dirWatcher = watch(paths.dir, (_event, filename) => {
+        const name = typeof filename === "string" ? filename : ""
+        if (name && name !== "selection.json" && name !== "active.json" && name !== "selection.json.tmp" && name !== "active.json.tmp") return
         if (bridgeTimer) clearTimeout(bridgeTimer)
         bridgeTimer = setTimeout(() => {
           bridgeTimer = undefined

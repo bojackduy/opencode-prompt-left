@@ -4,7 +4,11 @@ import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { Show, For, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { readFileSync, watch, writeFileSync, renameSync, mkdirSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { EventEmitter } from "node:events"
 import { statePaths, workspaceKey, type ActiveFile, type EstimateFile, type TuiSelection } from "./shared"
+
+try { EventEmitter.defaultMaxListeners = 20 } catch {}
+try { (process as unknown as { setMaxListeners?: (n: number) => void }).setMaxListeners?.(20) } catch {}
 
 const POLL_INTERVAL_MS = 5_000
 const ESTIMATE_DEBOUNCE_MS = 600
@@ -160,15 +164,8 @@ function PromptArea(props: {
   disabled?: boolean
   on_submit?: () => void
   ref?: (ref: unknown) => void
+  quotaActive: boolean
 }) {
-  const [quotaActive, setQuotaActive] = createSignal(quotaRendersPrompt(props.api))
-  onMount(() => {
-    const t = setInterval(() => {
-      const next = quotaRendersPrompt(props.api)
-      setQuotaActive((prev) => (prev === next ? prev : next))
-    }, QUOTA_CHECK_MS)
-    onCleanup(() => clearInterval(t))
-  })
   const activeLast = { value: "" }
   const writeActiveNow = () =>
     writeActive(paths.active, props.sessionID, activeLast, activeModel(props.api, props.sessionID), activeAgent(props.api, props.sessionID))
@@ -177,7 +174,7 @@ function PromptArea(props: {
   })
   return (
     <box gap={0}>
-      <Show when={!quotaActive()}>
+      <Show when={!props.quotaActive}>
         <props.api.ui.Prompt
           sessionID={props.sessionID}
           visible={props.visible}
@@ -186,7 +183,7 @@ function PromptArea(props: {
           ref={props.ref}
         />
       </Show>
-      <Show when={!quotaActive()}>
+      <Show when={!props.quotaActive}>
         <StatusLine api={props.api} estimate={props.estimate} />
       </Show>
     </box>
@@ -331,7 +328,9 @@ const tui: TuiPlugin = async (api) => {
   let estimateWatcher: ReturnType<typeof watch> | undefined
   try {
     mkdirSync(paths.dir, { recursive: true })
-    estimateWatcher = watch(paths.dir, () => {
+    estimateWatcher = watch(paths.dir, (_event, filename) => {
+      const name = typeof filename === "string" ? filename : ""
+      if (name && !name.startsWith("estimate.json")) return
       if (estimateTimer) clearTimeout(estimateTimer)
       estimateTimer = setTimeout(() => {
         estimateTimer = undefined
@@ -349,6 +348,13 @@ const tui: TuiPlugin = async (api) => {
   const stopModelWatch = watchModelSelection(api)
   api.lifecycle.onDispose(stopModelWatch)
 
+  const [quotaActive, setQuotaActive] = createSignal(quotaRendersPrompt(api))
+  const quotaTimer = setInterval(() => {
+    const next = quotaRendersPrompt(api)
+    setQuotaActive((prev) => (prev === next ? prev : next))
+  }, QUOTA_CHECK_MS)
+  api.lifecycle.onDispose(() => clearInterval(quotaTimer))
+
   api.slots.register({
     order: SLOT_ORDER,
     slots: {
@@ -357,6 +363,7 @@ const tui: TuiPlugin = async (api) => {
           <PromptArea
             api={api}
             estimate={estimate()}
+            quotaActive={quotaActive()}
             sessionID={props.session_id}
             visible={props.visible}
             disabled={props.disabled}
