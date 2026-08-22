@@ -481,7 +481,8 @@ const plugin: Plugin = async ({ client }, _options) => {
 
   function recompute() {
     const estimate: EstimateFile = computeEstimate(estimateInput())
-    const key = JSON.stringify(estimate)
+    const { at: _at, ...rest } = estimate as EstimateFile & { at: number }
+    const key = JSON.stringify(rest)
     if (key === lastEstimateKey) return
     lastEstimateKey = key
     writeJsonAtomic(paths.estimate, estimate)

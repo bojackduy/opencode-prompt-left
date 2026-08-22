@@ -44,22 +44,26 @@ function quotaRendersPrompt(api: Parameters<TuiPlugin>[0]): boolean {
 
 function writeSelection(path: string, model: { providerID: string; modelID: string }, last: { value: string }): void {
   const sel: TuiSelection = { providerID: model.providerID, modelID: model.modelID, at: Date.now() }
-  writeAtomic(path, sel, last)
-}
-
-function writeActive(path: string, sessionID: string, last: { value: string }, model?: { providerID: string; modelID: string }, agent?: string): void {
-  const active: ActiveFile = { sessionID, at: Date.now(), model, agent }
-  writeAtomic(path, active, last)
-}
-
-function writeAtomic(path: string, value: unknown, last: { value: string }): void {
-  const serialized = JSON.stringify(value)
-  if (serialized === last.value) return
-  last.value = serialized
+  const key = `${sel.providerID}:${sel.modelID}`
+  if (key === last.value) return
+  last.value = key
   try {
     mkdirSync(dirname(path), { recursive: true })
     const tmp = `${path}.tmp`
-    writeFileSync(tmp, serialized)
+    writeFileSync(tmp, JSON.stringify(sel))
+    renameSync(tmp, path)
+  } catch {}
+}
+
+function writeActive(path: string, sessionID: string, last: { value: string }, model?: { providerID: string; modelID: string }, agent?: string): void {
+  const key = `${sessionID}:${model?.providerID ?? ""}:${model?.modelID ?? ""}:${agent ?? ""}`
+  if (key === last.value) return
+  last.value = key
+  const active: ActiveFile = { sessionID, at: Date.now(), model, agent }
+  try {
+    mkdirSync(dirname(path), { recursive: true })
+    const tmp = `${path}.tmp`
+    writeFileSync(tmp, JSON.stringify(active))
     renameSync(tmp, path)
   } catch {}
 }
@@ -164,33 +168,17 @@ function PromptArea(props: {
 }) {
   const [quotaActive, setQuotaActive] = createSignal(quotaRendersPrompt(props.api))
   onMount(() => {
-    const t = setInterval(() => setQuotaActive(quotaRendersPrompt(props.api)), QUOTA_CHECK_MS)
+    const t = setInterval(() => {
+      const next = quotaRendersPrompt(props.api)
+      setQuotaActive((prev) => (prev === next ? prev : next))
+    }, QUOTA_CHECK_MS)
     onCleanup(() => clearInterval(t))
   })
   const activeLast = { value: "" }
-  let lastActiveAt = 0
-  let activeTimer: ReturnType<typeof setTimeout> | undefined
-  const writeActiveNow = () => {
-    const now = Date.now()
-    if (now - lastActiveAt < ACTIVE_WRITE_MS) {
-      if (activeTimer) clearTimeout(activeTimer)
-      activeTimer = setTimeout(() => {
-        activeTimer = undefined
-        lastActiveAt = Date.now()
-        writeActive(paths.active, props.sessionID, activeLast, activeModel(props.api, props.sessionID), activeAgent(props.api, props.sessionID))
-      }, ACTIVE_WRITE_MS - (now - lastActiveAt))
-      return
-    }
-    lastActiveAt = now
+  const writeActiveNow = () =>
     writeActive(paths.active, props.sessionID, activeLast, activeModel(props.api, props.sessionID), activeAgent(props.api, props.sessionID))
-  }
   onMount(() => {
     writeActiveNow()
-    const timer = setInterval(writeActiveNow, ACTIVE_WRITE_MS)
-    onCleanup(() => {
-      clearInterval(timer)
-      if (activeTimer) clearTimeout(activeTimer)
-    })
   })
   return (
     <box gap={0}>
@@ -326,7 +314,15 @@ const tui: TuiPlugin = async (api) => {
 
   const poll = () => {
     const next = loadEstimate()
-    const serialized = next ? JSON.stringify(next) : ""
+    if (!next) {
+      if (last !== "") {
+        last = ""
+        setEstimate(null)
+      }
+      return
+    }
+    const { at: _at, ...rest } = next as EstimateFile & { at: number }
+    const serialized = JSON.stringify(rest)
     if (serialized !== last) {
       last = serialized
       setEstimate(next)
