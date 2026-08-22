@@ -6,13 +6,13 @@ import { readFileSync, watch, writeFileSync, renameSync, mkdirSync } from "node:
 import { dirname, join } from "node:path"
 import { statePaths, workspaceKey, type ActiveFile, type EstimateFile, type TuiSelection } from "./shared"
 
-const POLL_INTERVAL_MS = 2_500
-const ESTIMATE_DEBOUNCE_MS = 300
+const POLL_INTERVAL_MS = 5_000
+const ESTIMATE_DEBOUNCE_MS = 600
 const SLOT_ORDER = 95
-const SELECTION_DEBOUNCE_MS = 500
+const SELECTION_DEBOUNCE_MS = 800
 const ACTIVE_WRITE_MS = 5_000
-const MODEL_POLL_INTERVAL_MS = 10_000
-const QUOTA_CHECK_MS = 5_000
+const MODEL_POLL_INTERVAL_MS = 15_000
+const QUOTA_CHECK_MS = 10_000
 
 const paths = statePaths(workspaceKey(process.cwd()))
 
@@ -88,7 +88,6 @@ function watchModelSelection(api: Parameters<TuiPlugin>[0]): () => void {
   }
   push()
   let timer: ReturnType<typeof setTimeout> | undefined
-  let watcher: ReturnType<typeof watch> | undefined
   const poll = () => {
     if (timer) clearTimeout(timer)
     timer = setTimeout(() => {
@@ -96,14 +95,10 @@ function watchModelSelection(api: Parameters<TuiPlugin>[0]): () => void {
       push()
     }, SELECTION_DEBOUNCE_MS)
   }
-  try {
-    watcher = watch(api.state.path.state, () => poll())
-  } catch {}
   const pollTimer = setInterval(poll, MODEL_POLL_INTERVAL_MS)
   return () => {
     if (timer) clearTimeout(timer)
     clearInterval(pollTimer)
-    watcher?.close()
   }
 }
 
@@ -191,7 +186,9 @@ function PromptArea(props: {
           ref={props.ref}
         />
       </Show>
-      <StatusLine api={props.api} estimate={props.estimate} />
+      <Show when={!quotaActive()}>
+        <StatusLine api={props.api} estimate={props.estimate} />
+      </Show>
     </box>
   )
 }
