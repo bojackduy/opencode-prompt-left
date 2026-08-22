@@ -7,11 +7,12 @@ import { dirname, join } from "node:path"
 import { statePaths, workspaceKey, type ActiveFile, type EstimateFile, type TuiSelection } from "./shared"
 
 const POLL_INTERVAL_MS = 2_500
-const ESTIMATE_DEBOUNCE_MS = 100
+const ESTIMATE_DEBOUNCE_MS = 300
 const SLOT_ORDER = 95
-const SELECTION_DEBOUNCE_MS = 300
-const ACTIVE_WRITE_MS = 2_500
-const MODEL_POLL_INTERVAL_MS = 5_000
+const SELECTION_DEBOUNCE_MS = 500
+const ACTIVE_WRITE_MS = 5_000
+const MODEL_POLL_INTERVAL_MS = 10_000
+const QUOTA_CHECK_MS = 5_000
 
 const paths = statePaths(workspaceKey(process.cwd()))
 
@@ -161,20 +162,35 @@ function PromptArea(props: {
   on_submit?: () => void
   ref?: (ref: unknown) => void
 }) {
-  const quotaActive = createMemo(() => quotaRendersPrompt(props.api))
+  const [quotaActive, setQuotaActive] = createSignal(quotaRendersPrompt(props.api))
+  onMount(() => {
+    const t = setInterval(() => setQuotaActive(quotaRendersPrompt(props.api)), QUOTA_CHECK_MS)
+    onCleanup(() => clearInterval(t))
+  })
   const activeLast = { value: "" }
-  const writeActiveNow = () =>
-    writeActive(
-      paths.active,
-      props.sessionID,
-      activeLast,
-      activeModel(props.api, props.sessionID),
-      activeAgent(props.api, props.sessionID),
-    )
+  let lastActiveAt = 0
+  let activeTimer: ReturnType<typeof setTimeout> | undefined
+  const writeActiveNow = () => {
+    const now = Date.now()
+    if (now - lastActiveAt < ACTIVE_WRITE_MS) {
+      if (activeTimer) clearTimeout(activeTimer)
+      activeTimer = setTimeout(() => {
+        activeTimer = undefined
+        lastActiveAt = Date.now()
+        writeActive(paths.active, props.sessionID, activeLast, activeModel(props.api, props.sessionID), activeAgent(props.api, props.sessionID))
+      }, ACTIVE_WRITE_MS - (now - lastActiveAt))
+      return
+    }
+    lastActiveAt = now
+    writeActive(paths.active, props.sessionID, activeLast, activeModel(props.api, props.sessionID), activeAgent(props.api, props.sessionID))
+  }
   onMount(() => {
     writeActiveNow()
     const timer = setInterval(writeActiveNow, ACTIVE_WRITE_MS)
-    onCleanup(() => clearInterval(timer))
+    onCleanup(() => {
+      clearInterval(timer)
+      if (activeTimer) clearTimeout(activeTimer)
+    })
   })
   return (
     <box gap={0}>
@@ -298,11 +314,12 @@ function DetailView(props: { api: Parameters<TuiPlugin>[0]; estimate: () => Esti
   )
 }
 
-let tuiMounted = false
+const TUI_KEY = "__opencode_prompt_left_tui"
+const g = globalThis as Record<string, unknown>
 
 const tui: TuiPlugin = async (api) => {
-  if (tuiMounted) return
-  tuiMounted = true
+  if (g[TUI_KEY]) return
+  g[TUI_KEY] = true
 
   const [estimate, setEstimate] = createSignal<EstimateFile | null>(null)
   let last = ""
@@ -330,7 +347,7 @@ const tui: TuiPlugin = async (api) => {
     })
   } catch {}
   api.lifecycle.onDispose(() => {
-    tuiMounted = false
+    g[TUI_KEY] = false
     clearInterval(timer)
     if (estimateTimer) clearTimeout(estimateTimer)
     estimateWatcher?.close()

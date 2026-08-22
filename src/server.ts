@@ -99,6 +99,9 @@ const plugin: Plugin = async ({ client }, _options) => {
   let bridgeTimer: ReturnType<typeof setTimeout> | undefined
   let lastSelKey = ""
   let lastActiveKey = ""
+  let lastHistoryKey = ""
+  let lastEstimateKey = ""
+  let saveHistoryTimer: ReturnType<typeof setTimeout> | undefined
   const pluginCleanup: (() => void)[] = []
 
   function modelKey(providerID: string, modelID: string): string {
@@ -137,7 +140,7 @@ const plugin: Plugin = async ({ client }, _options) => {
   function refreshBridge() {
     const changed = applySelection() || applyActive()
     if (changed) {
-      saveHistory()
+      saveHistoryImmediate()
       recompute()
     }
   }
@@ -300,13 +303,32 @@ const plugin: Plugin = async ({ client }, _options) => {
     writeJsonAtomic(GLOBAL_PRIOR_PATH, globalPrior)
   }
 
-  function saveHistory() {
+  function flushHistory() {
     history.prompts = telemetry.finished
     history.lastSelected = telemetry.lastSelected
     history.lastContext = telemetry.contextNow() ?? history.lastContext
     history.activeSession = telemetry.activeRoot
     updateGlobalPrior()
+    const key = JSON.stringify({ prompts: history.prompts, lastSelected: history.lastSelected, lastContext: history.lastContext, activeSession: history.activeSession, windows: history.windows, externalShare: history.externalShare, globalPriorCounted: history.globalPriorCounted })
+    if (key === lastHistoryKey) return
+    lastHistoryKey = key
     writeJsonAtomic(paths.history, history)
+  }
+
+  function saveHistory() {
+    if (saveHistoryTimer) return
+    saveHistoryTimer = setTimeout(() => {
+      saveHistoryTimer = undefined
+      flushHistory()
+    }, 400)
+  }
+
+  function saveHistoryImmediate() {
+    if (saveHistoryTimer) {
+      clearTimeout(saveHistoryTimer)
+      saveHistoryTimer = undefined
+    }
+    flushHistory()
   }
 
   function windowValue(map: Record<string, number> | undefined, entry: QuotaEntry): number | undefined {
@@ -435,7 +457,7 @@ const plugin: Plugin = async ({ client }, _options) => {
         tracker.lastPercentAt = now
       }
     }
-    saveHistory()
+    saveHistoryImmediate()
     recompute()
   }
 
@@ -443,7 +465,7 @@ const plugin: Plugin = async ({ client }, _options) => {
     if (recomputeTimer) clearTimeout(recomputeTimer)
     recomputeTimer = setTimeout(() => {
       recomputeTimer = undefined
-      saveHistory()
+      flushHistory()
       recompute()
     }, RECOMPUTE_DEBOUNCE_MS)
   }
@@ -459,6 +481,9 @@ const plugin: Plugin = async ({ client }, _options) => {
 
   function recompute() {
     const estimate: EstimateFile = computeEstimate(estimateInput())
+    const key = JSON.stringify(estimate)
+    if (key === lastEstimateKey) return
+    lastEstimateKey = key
     writeJsonAtomic(paths.estimate, estimate)
   }
 
@@ -509,13 +534,14 @@ const plugin: Plugin = async ({ client }, _options) => {
       telemetry.beginPrompt(input.sessionID, input.agent, input.model?.providerID, input.model?.modelID)
       drainUsageDeltas()
       reservePrompt(input.sessionID, input.model?.providerID)
-      saveHistory()
+      saveHistoryImmediate()
       recompute()
     },
     async dispose() {
       if (pollTimer) clearInterval(pollTimer)
       if (recomputeTimer) clearTimeout(recomputeTimer)
       if (bridgeTimer) clearTimeout(bridgeTimer)
+      if (saveHistoryTimer) clearTimeout(saveHistoryTimer)
       if (dirWatcher) dirWatcher.close()
       for (const cleanup of pluginCleanup) {
         try {
@@ -525,7 +551,7 @@ const plugin: Plugin = async ({ client }, _options) => {
       telemetry.finalizeAll()
       drainUsageDeltas()
       pruneReservations()
-      saveHistory()
+      saveHistoryImmediate()
       recompute()
     },
   }
