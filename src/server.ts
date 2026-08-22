@@ -4,8 +4,44 @@ import { watch, mkdirSync, statSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { EventEmitter } from "node:events"
 
-try { EventEmitter.defaultMaxListeners = 20 } catch {}
-try { (process as unknown as { setMaxListeners?: (n: number) => void }).setMaxListeners?.(20) } catch {}
+try { EventEmitter.defaultMaxListeners = 30 } catch {}
+try { (process as unknown as { setMaxListeners?: (n: number) => void }).setMaxListeners?.(30) } catch {}
+try {
+  const proto = EventEmitter.prototype as unknown as Record<string, unknown>
+  const origOn = proto["on"] as ((...a: unknown[]) => unknown) | undefined
+  const origAdd = proto["addListener"] as ((...a: unknown[]) => unknown) | undefined
+  const origOnce = proto["once"] as ((...a: unknown[]) => unknown) | undefined
+  const wrap = (orig: ((...a: unknown[]) => unknown) | undefined) =>
+    function (this: EventEmitter, ...args: unknown[]) {
+      try { if (this.getMaxListeners() <= 10) this.setMaxListeners(30) } catch {}
+      return (orig as (...a: unknown[]) => unknown).apply(this, args)
+    }
+  if (origOn) proto["on"] = wrap(origOn) as unknown as typeof origOn
+  if (origAdd) proto["addListener"] = wrap(origAdd) as unknown as typeof origAdd
+  if (origOnce) proto["once"] = wrap(origOnce) as unknown as typeof origOnce
+} catch {}
+try {
+  const origEmitWarning = process.emitWarning?.bind(process)
+  if (origEmitWarning) {
+    const seen = new Set<string>()
+    process.emitWarning = ((msg: unknown, ...rest: unknown[]) => {
+      const s = String(msg)
+      if (s.includes("MaxListenersExceededWarning") || s.includes("selection listeners")) {
+        if (seen.has(s)) return
+        seen.add(s)
+        try { (process as unknown as { setMaxListeners?: (n: number) => void }).setMaxListeners?.(30); EventEmitter.defaultMaxListeners = 30 } catch {}
+        return
+      }
+      return (origEmitWarning as (...a: unknown[]) => void)(msg, ...rest)
+    }) as typeof process.emitWarning
+  }
+} catch {}
+try {
+  process.on("warning", (w: unknown) => {
+    const s = String((w as { message?: unknown })?.message ?? w)
+    if (s.includes("MaxListeners") || s.includes("selection")) return
+  })
+} catch {}
 import { Telemetry } from "./telemetry"
 import { readQuotaSnapshot } from "./quota"
 import { loadPlans, type Plans } from "./budget"
@@ -348,8 +384,10 @@ const plugin: Plugin = async ({ client }, _options) => {
     target.tokens += delta.tokens
   }
 
-  function drainUsageDeltas() {
-    for (const delta of telemetry.drainUsageDeltas()) {
+  function drainUsageDeltas(): boolean {
+    const deltas = telemetry.drainUsageDeltas()
+    if (deltas.length === 0) return false
+    for (const delta of deltas) {
       for (const entry of quota?.entries ?? []) {
         if (entry.provider !== delta.provider) continue
         const tracker = (history.windows[`${entry.provider}::${entry.name}`] ??= { observations: [] })
@@ -359,6 +397,7 @@ const plugin: Plugin = async ({ client }, _options) => {
       const reservation = reservations.get(delta.rootSessionID)
       if (reservation?.provider === delta.provider) addQuotaUsage(reservation.actual, delta.usage)
     }
+    return true
   }
 
   function pruneReservations() {
@@ -569,13 +608,28 @@ const plugin: Plugin = async ({ client }, _options) => {
     async event({ event }: { event: Event }) {
       if (!TRACKED_EVENTS.has(event.type)) return
       telemetry.handle(event)
-      drainUsageDeltas()
-      pruneReservations()
-      if (event.type === "message.updated" && event.properties.info.role === "user") {
+      const hadDelta = drainUsageDeltas()
+      let needsRecompute = false
+      if (event.type === "session.idle" || event.type === "session.created" || event.type === "session.deleted" || event.type === "session.compacted") {
+        pruneReservations()
+        needsRecompute = true
+      } else if (event.type === "message.updated" && event.properties.info.role === "user") {
         const message = event.properties.info
         reservePrompt(message.sessionID, message.model.providerID, false)
+        needsRecompute = true
+      } else if (event.type === "message.part.updated") {
+        const part = (event.properties as unknown as { part: { type?: string } }).part
+        if (part?.type === "step-finish" && hadDelta) {
+          pruneReservations()
+          needsRecompute = true
+        } else if (hadDelta) {
+          needsRecompute = true
+        }
+      } else {
+        pruneReservations()
+        needsRecompute = true
       }
-      scheduleRecompute()
+      if (needsRecompute) scheduleRecompute()
     },
     async "chat.message"(input: { sessionID: string; agent?: string; model?: { providerID: string; modelID: string } }) {
       telemetry.noteSelection(input.sessionID, {

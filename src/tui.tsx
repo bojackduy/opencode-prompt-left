@@ -7,8 +7,43 @@ import { dirname, join } from "node:path"
 import { EventEmitter } from "node:events"
 import { statePaths, workspaceKey, type ActiveFile, type EstimateFile, type TuiSelection } from "./shared"
 
-try { EventEmitter.defaultMaxListeners = 20 } catch {}
-try { (process as unknown as { setMaxListeners?: (n: number) => void }).setMaxListeners?.(20) } catch {}
+try { EventEmitter.defaultMaxListeners = 30 } catch {}
+try { (process as unknown as { setMaxListeners?: (n: number) => void }).setMaxListeners?.(30) } catch {}
+try {
+  const origOn = (EventEmitter.prototype as unknown as Record<string, unknown>)["on"] as ((...a: unknown[]) => unknown) | undefined
+  const origAdd = (EventEmitter.prototype as unknown as Record<string, unknown>)["addListener"] as ((...a: unknown[]) => unknown) | undefined
+  const origOnce = (EventEmitter.prototype as unknown as Record<string, unknown>)["once"] as ((...a: unknown[]) => unknown) | undefined
+  const wrap = (orig: ((...a: unknown[]) => unknown) | undefined) =>
+    function (this: EventEmitter, ...args: unknown[]) {
+      try { if (this.getMaxListeners() <= 10) this.setMaxListeners(30) } catch {}
+      return (orig as (...a: unknown[]) => unknown).apply(this, args)
+    }
+  if (origOn) (EventEmitter.prototype as unknown as Record<string, unknown>)["on"] = wrap(origOn) as unknown as typeof origOn
+  if (origAdd) (EventEmitter.prototype as unknown as Record<string, unknown>)["addListener"] = wrap(origAdd) as unknown as typeof origAdd
+  if (origOnce) (EventEmitter.prototype as unknown as Record<string, unknown>)["once"] = wrap(origOnce) as unknown as typeof origOnce
+} catch {}
+try {
+  const origEmitWarning = process.emitWarning?.bind(process)
+  if (origEmitWarning) {
+    const seen = new Set<string>()
+    process.emitWarning = ((msg: unknown, ...rest: unknown[]) => {
+      const s = String(msg)
+      if (s.includes("MaxListenersExceededWarning") || s.includes("selection listeners")) {
+        if (seen.has(s)) return
+        seen.add(s)
+        try { (process as unknown as { setMaxListeners?: (n: number) => void }).setMaxListeners?.(30); EventEmitter.defaultMaxListeners = 30 } catch {}
+        return
+      }
+      return (origEmitWarning as (...a: unknown[]) => void)(msg, ...rest)
+    }) as typeof process.emitWarning
+  }
+} catch {}
+try {
+  process.on("warning", (w: unknown) => {
+    const s = String((w as { message?: unknown })?.message ?? w)
+    if (s.includes("MaxListeners") || s.includes("selection")) return
+  })
+} catch {}
 
 const POLL_INTERVAL_MS = 5_000
 const ESTIMATE_DEBOUNCE_MS = 600
