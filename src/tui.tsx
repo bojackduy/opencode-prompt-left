@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import type { JSX } from "@opentui/solid"
 import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
-import { Show, For, createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { Show, For, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { readFileSync, watch, writeFileSync, renameSync, mkdirSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { EventEmitter } from "node:events"
@@ -47,7 +47,7 @@ try {
 
 const POLL_INTERVAL_MS = 5_000
 const ESTIMATE_DEBOUNCE_MS = 600
-const SLOT_ORDER = 95
+const SLOT_ORDER = 85
 const SELECTION_DEBOUNCE_MS = 800
 const ACTIVE_WRITE_MS = 5_000
 const MODEL_POLL_INTERVAL_MS = 15_000
@@ -67,18 +67,7 @@ function quotaRendersPrompt(api: Parameters<TuiPlugin>[0]): boolean {
   const quota = api.plugins
     .list()
     .find((p) => p.id.startsWith("@slkiser/opencode-quota") || p.id === "opencode-quota")
-  if (!quota?.active) return false
-  try {
-    const sidecar = JSON.parse(
-      readFileSync(join(api.state.path.config, "opencode-quota", "quota-toast.json"), "utf8"),
-    ) as { tuiCompactStatus?: { enabled?: boolean; sessionPrompt?: boolean } }
-    const compact = sidecar.tuiCompactStatus
-    if (!compact) return false
-    if (compact.enabled === false) return false
-    return compact.sessionPrompt === true
-  } catch {
-    return false
-  }
+  return !!quota?.active
 }
 
 function writeSelection(path: string, model: { providerID: string; modelID: string }, last: { value: string }): void {
@@ -150,10 +139,13 @@ function compactFg(e: EstimateFile, api: Parameters<TuiPlugin>[0]) {
   return t.error
 }
 
-function StatusLine(props: { api: Parameters<TuiPlugin>[0]; estimate: EstimateFile | null }) {
+function StatusLine(props: { api: Parameters<TuiPlugin>[0]; estimate: () => EstimateFile | null }) {
   const theme = props.api.theme.current
-  const text = () => props.estimate?.compact ?? ""
-  const fg = () => (props.estimate ? compactFg(props.estimate, props.api) : theme.textMuted)
+  const text = () => props.estimate()?.compact ?? ""
+  const fg = () => {
+    const e = props.estimate()
+    return e ? compactFg(e, props.api) : theme.textMuted
+  }
   return (
     <Show when={text().length > 0}>
       <box flexDirection="row" justifyContent="flex-end">
@@ -193,13 +185,13 @@ function activeAgent(api: Parameters<TuiPlugin>[0], sessionID: string): string |
 
 function PromptArea(props: {
   api: Parameters<TuiPlugin>[0]
-  estimate: EstimateFile | null
+  estimate: () => EstimateFile | null
   sessionID: string
   visible?: boolean
   disabled?: boolean
   on_submit?: () => void
   ref?: (ref: unknown) => void
-  quotaActive: boolean
+  quotaActive: () => boolean
 }) {
   const activeLast = { value: "" }
   const writeActiveNow = () =>
@@ -207,20 +199,33 @@ function PromptArea(props: {
   onMount(() => {
     writeActiveNow()
   })
+  let promptRef: unknown
+  const handleRef = (r: unknown) => {
+    promptRef = r
+    props.ref?.(r as never)
+    if (r && !props.quotaActive()) {
+      setTimeout(() => {
+        try { (r as { focus?: () => void }).focus?.() } catch {}
+      }, 30)
+    }
+  }
+  createEffect(() => {
+    if (!props.quotaActive() && promptRef) {
+      try { (promptRef as { focus?: () => void }).focus?.() } catch {}
+    }
+  })
   return (
-    <box gap={0}>
-      <Show when={!props.quotaActive}>
+    <box gap={0} focusable={false}>
+      <Show when={!props.quotaActive()}>
         <props.api.ui.Prompt
           sessionID={props.sessionID}
           visible={props.visible}
           disabled={props.disabled}
           onSubmit={props.on_submit}
-          ref={props.ref}
+          ref={handleRef}
         />
       </Show>
-      <Show when={!props.quotaActive}>
-        <StatusLine api={props.api} estimate={props.estimate} />
-      </Show>
+      <StatusLine api={props.api} estimate={props.estimate} />
     </box>
   )
 }
@@ -384,11 +389,8 @@ const tui: TuiPlugin = async (api) => {
   api.lifecycle.onDispose(stopModelWatch)
 
   const [quotaActive, setQuotaActive] = createSignal(quotaRendersPrompt(api))
-  const quotaTimer = setInterval(() => {
-    const next = quotaRendersPrompt(api)
-    setQuotaActive((prev) => (prev === next ? prev : next))
-  }, QUOTA_CHECK_MS)
-  api.lifecycle.onDispose(() => clearInterval(quotaTimer))
+  const quotaInitTimer = setTimeout(() => setQuotaActive(quotaRendersPrompt(api)), 2000)
+  api.lifecycle.onDispose(() => clearTimeout(quotaInitTimer))
 
   api.slots.register({
     order: SLOT_ORDER,
@@ -397,8 +399,8 @@ const tui: TuiPlugin = async (api) => {
         return (
           <PromptArea
             api={api}
-            estimate={estimate()}
-            quotaActive={quotaActive()}
+            estimate={estimate}
+            quotaActive={quotaActive}
             sessionID={props.session_id}
             visible={props.visible}
             disabled={props.disabled}
