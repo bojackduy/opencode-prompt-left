@@ -199,11 +199,18 @@ function PromptArea(props: {
   onMount(() => {
     writeActiveNow()
   })
+  if (props.quotaActive()) {
+    return (
+      <box gap={0} focusable={false}>
+        <StatusLine api={props.api} estimate={props.estimate} />
+      </box>
+    )
+  }
   return (
     <box gap={0} focusable={false}>
       <props.api.ui.Prompt
         sessionID={props.sessionID}
-        visible={props.visible && !props.quotaActive()}
+        visible={props.visible}
         disabled={props.disabled}
         onSubmit={props.on_submit}
         ref={props.ref}
