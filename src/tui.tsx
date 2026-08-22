@@ -47,7 +47,7 @@ try {
 
 const POLL_INTERVAL_MS = 5_000
 const ESTIMATE_DEBOUNCE_MS = 600
-const SLOT_ORDER = 85
+const SLOT_ORDER = 95
 const SELECTION_DEBOUNCE_MS = 800
 const ACTIVE_WRITE_MS = 5_000
 const MODEL_POLL_INTERVAL_MS = 15_000
@@ -199,32 +199,15 @@ function PromptArea(props: {
   onMount(() => {
     writeActiveNow()
   })
-  let promptRef: unknown
-  const handleRef = (r: unknown) => {
-    promptRef = r
-    props.ref?.(r as never)
-    if (r && !props.quotaActive()) {
-      setTimeout(() => {
-        try { (r as { focus?: () => void }).focus?.() } catch {}
-      }, 30)
-    }
-  }
-  createEffect(() => {
-    if (!props.quotaActive() && promptRef) {
-      try { (promptRef as { focus?: () => void }).focus?.() } catch {}
-    }
-  })
   return (
     <box gap={0} focusable={false}>
-      <Show when={!props.quotaActive()}>
-        <props.api.ui.Prompt
-          sessionID={props.sessionID}
-          visible={props.visible}
-          disabled={props.disabled}
-          onSubmit={props.on_submit}
-          ref={handleRef}
-        />
-      </Show>
+      <props.api.ui.Prompt
+        sessionID={props.sessionID}
+        visible={props.visible && !props.quotaActive()}
+        disabled={props.disabled}
+        onSubmit={props.on_submit}
+        ref={props.ref}
+      />
       <StatusLine api={props.api} estimate={props.estimate} />
     </box>
   )
