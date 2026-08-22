@@ -377,8 +377,52 @@ const plugin: Plugin = async ({ client }, _options) => {
     return out
   }
 
+  function providerFallbackPricing(provider: string): { input: number; output: number; cacheRead: number; cacheWrite: number } | null {
+    let sumI = 0, sumO = 0, sumR = 0, sumW = 0, n = 0
+    for (const [k, v] of modelCatalog) {
+      if (!k.startsWith(`${provider}/`) || !v.cost) continue
+      if (v.cost.input == null && v.cost.output == null) continue
+      sumI += v.cost.input ?? 0; sumO += v.cost.output ?? 0; sumR += v.cost.cacheRead ?? 0; sumW += v.cost.cacheWrite ?? 0; n++
+    }
+    if (n === 0) {
+      for (const v of modelCatalog.values()) {
+        if (!v.cost) continue
+        sumI += v.cost.input ?? 0; sumO += v.cost.output ?? 0; sumR += v.cost.cacheRead ?? 0; sumW += v.cost.cacheWrite ?? 0; n++
+      }
+    }
+    if (n === 0) return null
+    return { input: sumI / n, output: sumO / n, cacheRead: sumR / n, cacheWrite: sumW / n }
+  }
+
   function estimateInput(): EstimateInput {
     const selected = telemetry.activeSelected()
+    const fallbackBudgets = (() => {
+      if (!selected.provider) return undefined
+      const direct = plans.budgets[selected.provider]
+      if (direct) return direct
+      if (selected.provider.startsWith("opencode") || selected.provider === "zen" || selected.provider === "muse" || selected.provider === "ox") {
+        return plans.budgets["opencode-go"] ?? plans.budgets["opencode"] ?? plans.budgets["zen"]
+      }
+      return undefined
+    })()
+    const fallbackLimits = (() => {
+      if (!selected.provider) return undefined
+      const direct = plans.limits[selected.provider]
+      if (direct) return direct
+      if (selected.provider.startsWith("opencode") || selected.provider === "zen" || selected.provider === "muse" || selected.provider === "ox") {
+        return plans.limits["opencode-go"]
+      }
+      return undefined
+    })()
+    const fallbackTokenLimits = (() => {
+      if (!selected.provider) return undefined
+      const direct = plans.tokenLimits[selected.provider]
+      if (direct) return direct
+      if (selected.provider.startsWith("opencode") || selected.provider === "zen" || selected.provider === "muse" || selected.provider === "ox") {
+        return plans.tokenLimits["opencode-go"]
+      }
+      return undefined
+    })()
     return {
       now: Date.now(),
       quota,
@@ -388,16 +432,17 @@ const plugin: Plugin = async ({ client }, _options) => {
       contextNow: telemetry.contextNow(),
       usableContext: usableContext(selected.provider, selected.model),
       externalShare: history.externalShare,
-      windowBudgets: selected.provider ? plans.budgets[selected.provider] : undefined,
-      windowLimits: selected.provider ? plans.limits[selected.provider] : undefined,
-      windowTokenLimits: selected.provider ? plans.tokenLimits[selected.provider] : undefined,
+      windowBudgets: fallbackBudgets,
+      windowLimits: fallbackLimits,
+      windowTokenLimits: fallbackTokenLimits,
       globalPrior,
       pendingByWindow: pendingByWindow(),
       modelPricing: (provider, model) => {
         const c = modelCatalog.get(modelKey(provider, model))?.cost
-        return c
-          ? { input: c.input ?? 0, output: c.output ?? 0, cacheRead: c.cacheRead ?? 0, cacheWrite: c.cacheWrite ?? 0 }
-          : null
+        if (c && (c.input != null || c.output != null || c.cacheRead != null)) {
+          return { input: c.input ?? 0, output: c.output ?? 0, cacheRead: c.cacheRead ?? 0, cacheWrite: c.cacheWrite ?? 0 }
+        }
+        return providerFallbackPricing(provider)
       },
     }
   }

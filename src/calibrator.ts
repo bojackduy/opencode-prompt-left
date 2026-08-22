@@ -211,7 +211,14 @@ export function windowEstimates(input: {
     .filter((e) => e.provider === input.provider)
     .map((e) => {
       const tracker = input.windows[`${e.provider}::${e.name}`]
-      const pending = input.pendingByWindow?.[`${e.provider}::${e.name}`]
+      let pending = input.pendingByWindow?.[`${e.provider}::${e.name}`]
+      if (!pending) {
+        for (const [k, v] of Object.entries(input.pendingByWindow ?? {})) {
+          if (k.startsWith(`${e.provider}::`) && normalizeWindowKey(k.slice(e.provider.length + 2)) === normalizeWindowKey(e.window ?? e.name)) {
+            pending = v; break
+          }
+        }
+      }
       const stats = tracker ? rateStats(tracker.observations) : null
       const remaining = e.percentRemaining ?? 0
       const prompts =
@@ -372,9 +379,28 @@ function forecastFromGlobal(
   return null
 }
 
+function normalizeWindowKey(s: string): string {
+  const v = s.trim().toLowerCase()
+  if (v === "5h" || v.includes("5h") || v.includes("5 hour") || v.includes("rolling")) return "5h"
+  if (v.includes("weekly") || v.includes("week")) return "Weekly"
+  if (v.includes("monthly") || v.includes("month")) return "Monthly"
+  if (v.includes("session")) return "Session"
+  return s
+}
+
 function planValue(map: Record<string, number> | undefined, e: QuotaSnapshot["entries"][number]): number | undefined {
   if (!map) return undefined
-  return map[e.window ?? ""] ?? map[e.name]
+  const direct = map[e.window ?? ""] ?? map[e.name]
+  if (direct !== undefined) return direct
+  const wn = normalizeWindowKey(e.window ?? "")
+  if (wn && map[wn] !== undefined) return map[wn]
+  const nn = normalizeWindowKey(e.name)
+  if (nn && map[nn] !== undefined) return map[nn]
+  for (const [k, v] of Object.entries(map)) {
+    const nk = normalizeWindowKey(k)
+    if (nk === wn || nk === nn) return v
+  }
+  return undefined
 }
 
 export function reconcilePendingUsage(
@@ -432,7 +458,14 @@ function worstBudgetEntry(
   for (const e of selectedProviderEntries) {
     const budget = planValue(windowBudgets, e)
     if (!budget || budget <= 0) continue
-    const pending = pendingByWindow?.[`${e.provider}::${e.name}`]
+    let pending = pendingByWindow?.[`${e.provider}::${e.name}`]
+    if (!pending) {
+      for (const [k, v] of Object.entries(pendingByWindow ?? {})) {
+        if (k.startsWith(`${e.provider}::`) && normalizeWindowKey(k.slice(e.provider.length + 2)) === normalizeWindowKey(e.window ?? e.name)) {
+          pending = v; break
+        }
+      }
+    }
     const usd = Math.max(0, (budget * (e.percentRemaining ?? 0)) / 100 - (pending?.cost ?? 0))
     if (!best || usd < best.usd) {
       best = { entry: e, budget, usd }
@@ -532,7 +565,31 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   if (!quota || quota.entries.length === 0) return base
 
   const quotaAgeSec = Math.max(0, (now - quota.at) / 1000)
-  const selectedProviderEntries = quota.entries.filter((e) => e.provider === selected.provider)
+  const isOpencodeVariant = (p?: string) => !!p && (p === "opencode-go" || p === "opencode" || p === "zen" || p.startsWith("muse") || p.startsWith("ox") || p.startsWith("opencode"))
+  let selectedProviderEntries = quota.entries.filter((e) => e.provider === selected.provider)
+  if (selectedProviderEntries.length === 0 && isOpencodeVariant(selected.provider)) {
+    selectedProviderEntries = quota.entries.filter((e) => isOpencodeVariant(e.provider))
+  }
+  const resolvePending = (e: QuotaSnapshot["entries"][number]): QuotaUsage | undefined => {
+    const direct = input.pendingByWindow?.[`${e.provider}::${e.name}`]
+    if (direct) return direct
+    for (const [k, v] of Object.entries(input.pendingByWindow ?? {})) {
+      if (k.startsWith(`${e.provider}::`)) {
+        const suffix = k.slice(e.provider.length + 2)
+        if (normalizeWindowKey(suffix) === normalizeWindowKey(e.window ?? e.name)) return v
+      }
+    }
+    if (isOpencodeVariant(e.provider)) {
+      for (const [k, v] of Object.entries(input.pendingByWindow ?? {})) {
+        const prov = k.split("::")[0]
+        if (isOpencodeVariant(prov)) {
+          const suffix = k.slice(prov.length + 2)
+          if (normalizeWindowKey(suffix) === normalizeWindowKey(e.window ?? e.name)) return v
+        }
+      }
+    }
+    return undefined
+  }
   const selectedPricing =
     selected.provider && selected.model ? input.modelPricing?.(selected.provider, selected.model) : null
   const forecast =
@@ -597,7 +654,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
         base,
         worst.entry,
         worst.budget,
-        input.pendingByWindow?.[`${worst.entry.provider}::${worst.entry.name}`],
+        resolvePending(worst.entry),
       )
     }
     return priorEstimate(base, selectedProviderEntries, quotaAgeSec)
@@ -613,7 +670,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
   let rateObsCount = 0
   for (const e of selectedProviderEntries) {
     const remaining = e.percentRemaining ?? 0
-    const pending = input.pendingByWindow?.[`${e.provider}::${e.name}`]
+    const pending = resolvePending(e)
     const budget = planValue(input.windowBudgets, e)
     const limit = planValue(input.windowLimits, e)
     const tokenLimit = planValue(input.windowTokenLimits, e)
@@ -716,7 +773,7 @@ export function computeEstimate(input: EstimateInput): EstimateFile {
         base,
         worst.entry,
         worst.budget,
-        input.pendingByWindow?.[`${worst.entry.provider}::${worst.entry.name}`],
+        resolvePending(worst.entry),
       )
     }
     return priorEstimate(base, selectedProviderEntries, quotaAgeSec)

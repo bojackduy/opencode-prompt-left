@@ -11,6 +11,11 @@ import type { PricingConfig, PricingOverride } from "./shared"
 //   absolute limits, so no defaults — configure via prompt-left.json
 export const DEFAULT_BUDGETS: Record<string, Record<string, number>> = {
   "opencode-go": { "5h": 12, Weekly: 30, Monthly: 60 },
+  "opencode": { "5h": 12, Weekly: 30, Monthly: 60 },
+  zen: { "5h": 12, Weekly: 30, Monthly: 60 },
+  "muse-spark": { "5h": 12, Weekly: 30, Monthly: 60 },
+  muse: { "5h": 12, Weekly: 30, Monthly: 60 },
+  ox: { "5h": 12, Weekly: 30, Monthly: 60 },
   copilot: { Copilot: 15 },
 }
 
@@ -22,6 +27,19 @@ export interface PlansConfig {
   budgets?: Record<string, Record<string, number>>
   limits?: Record<string, Record<string, number>>
   tokenLimits?: Record<string, Record<string, number>>
+}
+
+export const DEFAULT_PRICING_OVERRIDES: Record<string, Record<string, PricingOverride>> = {
+  "opencode-go": {
+    "muse-spark-1.2-contributor": { input: 0.5, output: 2, cacheRead: 0.05 },
+    "muse-spark-1-2-contributor": { input: 0.5, output: 2, cacheRead: 0.05 },
+    "ox-alpha": { input: 0.5, output: 2, cacheRead: 0.05 },
+    "ox_alpha": { input: 0.5, output: 2, cacheRead: 0.05 },
+  },
+  "opencode": {
+    "muse-spark-1.2-contributor": { input: 0.5, output: 2, cacheRead: 0.05 },
+    "ox-alpha": { input: 0.5, output: 2, cacheRead: 0.05 },
+  },
 }
 
 export interface Plans {
@@ -42,13 +60,23 @@ function merge(defaults: Record<string, Record<string, number>>, overrides?: Rec
   return out
 }
 
+function mergePricing(
+  defaults: Record<string, Record<string, PricingOverride>>,
+  overrides?: Record<string, Record<string, PricingOverride>>,
+): Record<string, Record<string, PricingOverride>> {
+  const out: Record<string, Record<string, PricingOverride>> = {}
+  for (const [p, ms] of Object.entries(defaults)) out[p] = { ...ms }
+  for (const [p, ms] of Object.entries(overrides ?? {})) out[p] = { ...(out[p] ?? {}), ...ms }
+  return out
+}
+
 export function loadPlans(path = CONFIG_PATH): Plans {
   const cfg = readJson<PricingConfig>(path)
   return {
     budgets: merge(DEFAULT_BUDGETS, cfg?.budgets),
     limits: merge(DEFAULT_LIMITS, cfg?.limits),
     tokenLimits: merge({}, cfg?.tokenLimits),
-    pricingOverrides: cfg?.pricingOverrides ?? {},
+    pricingOverrides: mergePricing(DEFAULT_PRICING_OVERRIDES, cfg?.pricingOverrides),
   }
 }
 
